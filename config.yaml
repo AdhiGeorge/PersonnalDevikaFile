@@ -1,0 +1,188 @@
+# Azure OpenAI Configuration
+azure_openai:
+  enabled: true
+  model: "gpt-4o"
+  api_version: "2024-02-15-preview"
+  temperature: 0
+  max_tokens: 4000
+  timeout: 60
+  retry_attempts: 3
+  retry_delay: 2
+  endpoint: ""  # Add your Azure OpenAI endpoint here
+  api_key: ""  # Add your Azure OpenAI API key here
+  pricing:
+    input: 0.03  # per 1K tokens
+    output: 0.06  # per 1K tokens
+
+# Search Engine Configuration
+search_engines:
+  primary: "duckduckgo"
+  fallbacks:
+    tavily:
+      enabled: false
+      api_key: ""  # Add your Tavily API key here
+      pricing:
+        basic: 0.10  # per request
+    google:
+      enabled: false
+      api_key: ""  # Add your Google API key here
+      search_engine_id: ""  # Add your Google Search Engine ID here
+      pricing:
+        basic: 0.05  # per request
+
+# Server Configuration
+server:
+  host: "0.0.0.0"
+  port: 1337
+  debug: false
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+
+# Frontend Configuration
+frontend:
+  url: "http://localhost:3000"
+  allowed_origins:
+    - "http://localhost:3000"
+    - "https://localhost:3000"
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  log_prompts: true
+  log_rest_api: true
+  log_file: "logs/app.log"
+  metrics:
+    enabled: true
+    prometheus_port: 9090
+    collect_interval: 60  # seconds
+
+# API Keys for LLM providers
+llm_providers:
+  openai:
+    api_key: ""  # Add your OpenAI API key here
+    pricing:
+      gpt-4:
+        input: 0.03  # per 1K tokens
+        output: 0.06  # per 1K tokens
+      gpt-3.5-turbo:
+        input: 0.0015  # per 1K tokens
+        output: 0.002  # per 1K tokens
+  anthropic:
+    api_key: ""  # Add your Anthropic API key here
+    pricing:
+      claude-3-opus:
+        input: 0.015  # per 1K tokens
+        output: 0.075  # per 1K tokens
+      claude-3-sonnet:
+        input: 0.003  # per 1K tokens
+        output: 0.015  # per 1K tokens
+  google:
+    api_key: ""  # Add your Google API key here
+    pricing:
+      gemini-pro:
+        input: 0.00025  # per 1K tokens
+        output: 0.0005  # per 1K tokens
+  mistral:
+    api_key: ""  # Add your Mistral API key here
+    pricing:
+      mistral-large:
+        input: 0.007  # per 1K tokens
+        output: 0.024  # per 1K tokens
+  groq:
+    api_key: ""  # Add your Groq API key here
+    pricing:
+      llama2-70b:
+        input: 0.0007  # per 1K tokens
+        output: 0.0008  # per 1K tokens
+
+# DuckDuckGo Configuration
+duckduckgo:
+  request_delay: 1
+  max_retries: 3
+  timeout: 30
+  max_results: 5
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+  regions:
+    - "us-en"
+    - "uk-en"
+    - "au-en"
+  daily_request_limit: 1000
+  rate_limit_window: 3600  # 1 hour in seconds
+  rate_limit_max_requests: 100
+  backoff_factor: 2
+  max_backoff: 60  # Maximum backoff time in seconds
+
+# Storage Configuration
+storage:
+  sqlite_db: "data/agent.db"
+  screenshots_dir: "data/screenshots"
+  pdfs_dir: "data/pdfs"
+  projects_dir: "data/projects"
+  logs_dir: "logs"
+  repos_dir: "data/repos"
+  cache:
+    enabled: true
+    max_size: 1000  # items
+    ttl: 3600  # seconds
+
+# Qdrant Configuration
+qdrant:
+  url: "http://localhost:6333"
+  collection: "agent_knowledge"
+  vector_size: 384  # for all-MiniLM-L6-v2
+  distance: "Cosine"
+  on_disk_payload: true
+  optimizers_config:
+    indexing_threshold: 20000
+    memmap_threshold: 50000
+
+# Embedding Model Configuration
+embedding:
+  model: "all-MiniLM-L6-v2"
+  cache:
+    enabled: true
+    max_size: 10000  # items
+    ttl: 86400  # 24 hours in seconds
+
+# Error Handling Configuration
+error_handling:
+  max_retries: 3
+  retry_delay: 2
+  backoff_factor: 2
+  max_backoff: 60
+  timeout: 30
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    reset_timeout: 60
+
+# Monitoring Configuration
+monitoring:
+  enabled: true
+  metrics:
+    prometheus:
+      enabled: true
+      port: 9090
+    grafana:
+      enabled: true
+      port: 3000
+  tracing:
+    enabled: true
+    jaeger:
+      enabled: true
+      host: "localhost"
+      port: 6831
+  logging:
+    level: "INFO"
+    format: "json"
+    handlers:
+      - type: "file"
+        filename: "logs/app.log"
+        max_bytes: 10485760  # 10MB
+        backup_count: 5
+      - type: "console"
+        level: "INFO" 
