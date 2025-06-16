@@ -26,7 +26,6 @@ A modern, async, and scalable agent orchestration framework leveraging state-of-
 │   ├── llm/                # LLM client and inference
 │   ├── services/           # Service integrations
 │   └── utils/              # Utility functions
-├── ui/                     # Web UI (Svelte)
 ├── data/                   # Data storage (cache, logs, projects)
 ├── docs/                   # Documentation
 ├── tests/                  # Unit and integration tests
@@ -82,28 +81,6 @@ A modern, async, and scalable agent orchestration framework leveraging state-of-
    ```sh
    python main.py
    ```
-   - This will start the Flask-SocketIO server on port 1337.
-
-### Frontend
-
-1. **Navigate to the UI directory:**
-   ```sh
-   cd ui
-   ```
-
-2. **Install dependencies:**
-   ```sh
-   npm install
-   ```
-
-3. **Start the development server:**
-   ```sh
-   npm run dev
-   ```
-   - This will start the Svelte UI on port 3000 (or as shown in the terminal).
-
-4. **Access the UI:**
-   - Open your browser to `http://localhost:3000`
 
 ## Configuration
 
@@ -203,21 +180,8 @@ from src.logger import Logger
 
 logger = Logger()
 logger.info("This is an info message.")
-logger.warning("This is a warning message.")
 logger.error("This is an error message.")
-logger.debug("This is a debug message.")
-logger.exception("This is an exception message.")
-print(logger.read_log_file())
 ```
-
-### Socket Instance
-
-```python
-from src.socket_instance import emit_agent
-
-emit_agent("test-channel", {"msg": "Hello from socket_instance!"}, log=True)
-```
-
 
 Install Microsoft Visual C++ Build Tools:
    Download and install the Microsoft C++ Build Tools

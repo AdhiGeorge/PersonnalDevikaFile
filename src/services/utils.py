@@ -1,97 +1,58 @@
-# create wrapper function that will has retry logic of 5 times
-import sys
+import functools
 import time
-from functools import wraps
-import json
+import asyncio
+from typing import Callable, Any, Union, Awaitable
 
-from src.socket_instance import emit_agent
-
-def retry_wrapper(func):
-    def wrapper(*args, **kwargs):
-        max_tries = 5
-        tries = 0
-        while tries < max_tries:
-            result = func(*args, **kwargs)
-            if result:
-                return result
-            print("Invalid response from the model, I'm trying again...")
-            emit_agent("info", {"type": "warning", "message": "Invalid response from the model, trying again..."})
-            tries += 1
-            time.sleep(2)
-        print("Maximum 5 attempts reached. try other models")
-        emit_agent("info", {"type": "error", "message": "Maximum attempts reached. model keeps failing."})
-        sys.exit(1)
-
-        return False
-    return wrapper
-
+def retry_wrapper(func: Callable) -> Callable:
+    """Decorator that retries a function if it fails. Handles both sync and async functions."""
+    @functools.wraps(func)
+    async def async_wrapper(*args, **kwargs) -> Any:
+        max_retries = 3
+        retry_delay = 1  # seconds
         
-class InvalidResponseError(Exception):
-    pass
-
-def validate_responses(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        args = list(args)
-        response = args[1]
-        response = response.strip()
-
-        try:
-            response = json.loads(response)
-            print("first", type(response))
-            args[1] = response
-            return func(*args, **kwargs)
-
-        except json.JSONDecodeError:
-            pass
-
-        try:
-            response = response.split("```")[1]
-            if response:
-                response = json.loads(response.strip())
-                print("second", type(response))
-                args[1] = response
-                return func(*args, **kwargs)
-
-        except (IndexError, json.JSONDecodeError):
-            pass
-
-        try:
-            start_index = response.find('{')
-            end_index = response.rfind('}')
-            if start_index != -1 and end_index != -1:
-                json_str = response[start_index:end_index+1]
-                try:
-                    response = json.loads(json_str)
-                    print("third", type(response))
-                    args[1] = response
-                    return func(*args, **kwargs)
-
-                except json.JSONDecodeError:
-                    pass
-        except json.JSONDecodeError:
-            pass
-
-<<<<<<< HEAD
-        # Fallback: treat *response* as plain text and wrap in expected structure.
-        fallback = {"response": response, "action": "answer"}
-        args[1] = fallback
-        return func(*args, **kwargs)
-=======
-        for line in response.splitlines():
+        for attempt in range(max_retries):
             try:
-                response = json.loads(line)
-                print("fourth", type(response))
-                args[1] = response
+                return await func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise e
+                await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+        return None
+
+    @functools.wraps(func)
+    def sync_wrapper(*args, **kwargs) -> Any:
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
                 return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise e
+                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+        return None
 
-            except json.JSONDecodeError:
-                pass
+    if asyncio.iscoroutinefunction(func):
+        return async_wrapper
+    return sync_wrapper
 
-        # If all else fails, raise an exception
-        emit_agent("info", {"type": "error", "message": "Failed to parse response as JSON"})
-        raise InvalidResponseError("Failed to parse response as JSON")
-        # return False
->>>>>>> 925f80e (fifth commit)
+def validate_responses(func: Callable) -> Callable:
+    """Decorator that validates the response from a function."""
+    @functools.wraps(func)
+    async def async_wrapper(*args, **kwargs) -> Any:
+        result = await func(*args, **kwargs)
+        if result is None or result is False:
+            raise ValueError("Invalid response from function")
+        return result
 
-    return wrapper
+    @functools.wraps(func)
+    def sync_wrapper(*args, **kwargs) -> Any:
+        result = func(*args, **kwargs)
+        if result is None or result is False:
+            raise ValueError("Invalid response from function")
+        return result
+
+    if asyncio.iscoroutinefunction(func):
+        return async_wrapper
+    return sync_wrapper 

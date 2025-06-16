@@ -1,20 +1,90 @@
 import os
 import time
 import json
-
-<<<<<<< HEAD
-from typing import List, Dict
-=======
-from typing import List, Dict, Union
->>>>>>> 925f80e (fifth commit)
+from typing import List, Dict, Any
+import sys
+from functools import wraps
+import logging
 
 from src.config import Config
 from src.llm import LLM
 from src.state import AgentState
-from src.services.utils import retry_wrapper, validate_responses
-from src.socket_instance import emit_agent
 from src.agents.base_agent import BaseAgent
 from agent.core.knowledge_base import KnowledgeBase
+
+logger = logging.getLogger(__name__)
+
+def retry_wrapper(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        max_tries = 5
+        tries = 0
+        while tries < max_tries:
+            result = func(*args, **kwargs)
+            if result:
+                return result
+            logger.warning("Invalid response from the model, trying again...")
+            tries += 1
+            time.sleep(2)
+        logger.error("Maximum 5 attempts reached. Model keeps failing.")
+        sys.exit(1)
+    return wrapper
+
+class InvalidResponseError(Exception):
+    pass
+
+def validate_responses(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        args = list(args)
+        response = args[1]
+        response = response.strip()
+
+        try:
+            response = json.loads(response)
+            args[1] = response
+            return func(*args, **kwargs)
+
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            response = response.split("```")[1]
+            if response:
+                response = json.loads(response.strip())
+                args[1] = response
+                return func(*args, **kwargs)
+
+        except (IndexError, json.JSONDecodeError):
+            pass
+
+        try:
+            start_index = response.find('{')
+            end_index = response.rfind('}')
+            if start_index != -1 and end_index != -1:
+                json_str = response[start_index:end_index+1]
+                try:
+                    response = json.loads(json_str)
+                    args[1] = response
+                    return func(*args, **kwargs)
+
+                except json.JSONDecodeError:
+                    pass
+        except json.JSONDecodeError:
+            pass
+
+        for line in response.splitlines():
+            try:
+                response = json.loads(line)
+                args[1] = response
+                return func(*args, **kwargs)
+
+            except json.JSONDecodeError:
+                pass
+
+        raise InvalidResponseError("Failed to parse response as JSON")
+
+    return wrapper
 
 class Feature(BaseAgent):
     def __init__(self, base_model: str):
@@ -24,18 +94,17 @@ class Feature(BaseAgent):
         
         self.llm = LLM(model_id=base_model)
 
-    def format_prompt(self, plan: str) -> str:
-        """Format the feature prompt with the plan."""
+    def format_prompt(self, conversation: list, code_markdown: str, system_os: str) -> str:
+        """Format the feature prompt with the code and issue."""
         prompt_template = self.get_prompt("feature")
         if not prompt_template:
             raise ValueError("Feature prompt not found in prompts.yaml")
-        return super().format_prompt(prompt_template, plan=plan)
+        return super().format_prompt(prompt_template,conversation=conversation, code_markdown=code_markdown, system_os=system_os)
 
     @validate_responses
     def validate_response(self, response: str):
         """Validate the response from the LLM."""
         try:
-            # The response should be a valid JSON string
             data = json.loads(response)
             if not isinstance(data, dict):
                 return False
@@ -46,14 +115,6 @@ class Feature(BaseAgent):
             return response
         except json.JSONDecodeError:
             return False
-
-    def render(
-        self,
-        conversation: list,
-        code_markdown: str,
-        system_os: str
-    ) -> str:
-        return self.format_prompt(  conversation=conversation, code_markdown=code_markdown, system_os=system_os)
 
     def save_code_to_project(self, response: List[Dict[str, str]], project_name: str):
         file_path_dir = None
@@ -77,7 +138,7 @@ class Feature(BaseAgent):
         response = "\n".join([f"File: `{file['file']}`:\n```\n{file['code']}\n```" for file in response])
         return f"~~~\n{response}\n~~~"
 
-    def emulate_code_writing(self, code_set: list, project_name: str):
+    async def emulate_code_writing(self, code_set: list, project_name: str):
         files = []
         for file in code_set:
             filename = file["file"]
@@ -93,29 +154,31 @@ class Feature(BaseAgent):
                 "code": code,
             })
             AgentState().add_to_current_state(project_name, new_state)
-            time.sleep(1)
-        emit_agent("code", {
-            "files": files,
-            "from": "feature"
-        })
+            await asyncio.sleep(1) # Use asyncio.sleep for async functions
+        # Removed emit_agent call as it is frontend related
 
     @retry_wrapper
-    def execute(self, feature_request: str, context: str = "", project_name: str = "") -> str:
-        """Execute the feature agent."""
-        formatted_prompt = self.format_prompt(feature_request, context)
-        response = self.llm.inference(formatted_prompt, project_name)
-        validated = self.validate_response(response)
-        # Store in knowledge base if valid
-        if validated:
-            kb = KnowledgeBase()
-            kb.add_document(
-                text=validated,
-                metadata={"agent": "feature", "project_name": project_name, "feature_request": feature_request, "context": context}
-            )
-        return validated
+    async def execute(self, feature_request: str, context: str = "", project_name: str = "") -> str:
+        self.state.set_agent_state(project_name, self.__class__.__name__)
+
+        prompt_name = "feature"
+        prompt = self.prompt_manager.get_prompt(prompt_name)
+        if not prompt:
+            raise ValueError(f"Prompt '{prompt_name}' not found.")
+
+        prompt_args = {
+            "feature_request": feature_request,
+            "context": context
+        }
+        formatted_prompt = self.format_prompt(prompt, **prompt_args)
+
+        logger.info(f"Feature Agent - Sending prompt to LLM: {formatted_prompt[:200]}...")
+        response = await self.llm.chat_completion([{"role": "user", "content": formatted_prompt}], self.base_model)
+        logger.info(f"Feature Agent - Received response from LLM: {response}")
+
+        return response.choices[0].message.content
 
     def parse_response(self, response: str) -> dict:
-        """Parse the feature agent's response into a structured format."""
         try:
             data = json.loads(response)
             return {

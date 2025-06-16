@@ -1,2 +1,1 @@
-from .browser import Browser
-from .interaction import start_interaction
+from .browser import Browser, start_interaction

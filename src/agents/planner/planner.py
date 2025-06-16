@@ -1,75 +1,121 @@
 import json
+import logging
+import re
+from typing import Dict, Any, List
 from src.agents.base_agent import BaseAgent
 from src.services.utils import retry_wrapper, validate_responses
 from agent.core.knowledge_base import KnowledgeBase
+from src.llm.llm import LLM
+from src.config import Config
+
+logger = logging.getLogger(__name__)
 
 class Planner(BaseAgent):
-    def __init__(self, base_model: str):
-        super().__init__(base_model)
+    """Planner agent for creating execution plans."""
+    
+    def __init__(self, config: Config):
+        """Initialize the planner agent."""
+        super().__init__(config)
+        self.llm = LLM(config)
+        self.system_prompt = self.get_prompt("planner")
+        if not self.system_prompt:
+            raise ValueError("Planner prompt not found in prompts.yaml")
 
     def format_prompt(self, prompt: str) -> str:
         """Format the planner prompt with the user's prompt."""
-        prompt_template = self.get_prompt("planner")
-        if not prompt_template:
-            raise ValueError("Planner prompt not found in prompts.yaml")
-        return super().format_prompt(prompt_template, prompt=prompt)
+        return super().format_prompt(self.system_prompt, prompt=prompt)
 
-    @validate_responses
-    def validate_response(self, response: str):
-        """Validate the response from the LLM."""
+    def validate_response(self, response: Any) -> Dict[str, Any]:
+        """Validate the response format."""
         try:
-            # The response should be in the format specified in the prompt
-            # We'll just check if it contains the required sections
-            required_sections = ["Project Name:", "Your Reply to the Human Prompter:", "Current Focus:", "Plan:", "Summary:"]
-            for section in required_sections:
-                if section not in response:
-                    return False
-            return response
-        except Exception:
-            return False
+            # If response is already a dict, use it directly
+            if isinstance(response, dict):
+                data = response
+            else:
+                # Try to extract JSON from a markdown code block
+                match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", response, re.IGNORECASE)
+                if match:
+                    json_str = match.group(1)
+                else:
+                    # Fallback: find first { and last }
+                    start = response.find('{')
+                    end = response.rfind('}')
+                    if start != -1 and end != -1:
+                        json_str = response[start:end+1]
+                    else:
+                        raise ValueError("No JSON object found in response")
+                data = json.loads(json_str)
+
+            # Check required fields
+            if "steps" not in data or not isinstance(data["steps"], list):
+                raise ValueError("Response must contain a 'steps' list")
+            if "final_answer" not in data or not isinstance(data["final_answer"], dict):
+                raise ValueError("Response must contain a 'final_answer' object")
+            # Validate steps
+            for step in data["steps"]:
+                if not isinstance(step, dict):
+                    raise ValueError("Each step must be an object")
+                if "id" not in step or not isinstance(step["id"], str):
+                    raise ValueError("Each step must have an 'id' string")
+                if "agent" not in step or step["agent"] not in ["researcher", "developer", "answer"]:
+                    raise ValueError("Each step must have a valid 'agent' field")
+                if "description" not in step:
+                    raise ValueError("Each step must have a 'description' field")
+                if "expected_output" not in step:
+                    raise ValueError("Each step must have an 'expected_output' field")
+                if "queries" in step and not isinstance(step["queries"], list):
+                    raise ValueError("Step queries must be a list")
+                if "dependencies" in step and not isinstance(step["dependencies"], list):
+                    raise ValueError("Step dependencies must be a list")
+            # Validate final answer
+            final = data["final_answer"]
+            if "agent" not in final or final["agent"] != "answer":
+                raise ValueError("Final answer must have agent 'answer'")
+            if "description" not in final:
+                raise ValueError("Final answer must have a description")
+            if "required_components" not in final or not isinstance(final["required_components"], list):
+                raise ValueError("Final answer must have a required_components list")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing response as JSON: {str(e)}")
+            raise ValueError(f"Invalid JSON response: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error validating response: {str(e)}")
+            raise ValueError(f"Invalid response format: {str(e)}")
 
     @retry_wrapper
-    def execute(self, prompt: str, project_name: str) -> str:
-        """Execute the planner agent."""
-        formatted_prompt = self.format_prompt(prompt)
-        response = self.llm.inference(formatted_prompt, project_name)
-        validated = self.validate_response(response)
-        # Store in knowledge base if valid
-        if validated:
-            kb = KnowledgeBase()
-            kb.add_document(
-                text=validated,
-                metadata={"agent": "planner", "project_name": project_name, "prompt": prompt}
-            )
-        return validated
-
-    def parse_response(self, response: str) -> dict:
-        """Parse the planner's response into a structured format."""
+    async def execute(self, prompt: str) -> Dict[str, Any]:
+        """Execute the planning phase."""
         try:
-            # Extract sections from the response
-            sections = response.split("\n\n")
-            result = {}
-            
-            for section in sections:
-                if section.startswith("Project Name:"):
-                    result["project_name"] = section.replace("Project Name:", "").strip()
-                elif section.startswith("Your Reply to the Human Prompter:"):
-                    result["reply"] = section.replace("Your Reply to the Human Prompter:", "").strip()
-                elif section.startswith("Current Focus:"):
-                    result["focus"] = section.replace("Current Focus:", "").strip()
-                elif section.startswith("Plan:"):
-                    plan_text = section.replace("Plan:", "").strip()
-                    result["plans"] = [step.strip() for step in plan_text.split("\n") if step.strip()]
-                elif section.startswith("Summary:"):
-                    result["summary"] = section.replace("Summary:", "").strip()
-            
-            return result
+            # Prepare messages for the LLM
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+
+            # Get response from LLM
+            response = await self.llm.chat_completion(messages)
+            content = response.choices[0].message.content
+            logger.info(f"Raw response content: {content}")
+
+            # Validate and parse the response
+            data = self.validate_response(content)
+
+            # Log the plan
+            logger.info(f"Generated plan with {len(data['steps'])} steps")
+            for step in data['steps']:
+                logger.info(f"Step {step['id']}: {step['description']}")
+
+            return data
+
         except Exception as e:
-            self.logger.error(f"Error parsing planner response: {str(e)}")
-            return {
-                "project_name": "",
-                "reply": "I apologize, but I encountered an error while creating the plan.",
-                "focus": "",
-                "plans": [],
-                "summary": ""
-            }
+            logger.error(f"Error in planning phase: {str(e)}")
+            raise
+
+    def parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse the validated response."""
+        return response
+
+    def format_response(self, response: dict) -> str:
+        """Format the response from the planner."""
+        return json.dumps(response)

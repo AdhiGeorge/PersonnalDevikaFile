@@ -1,288 +1,347 @@
-import requests
-import yaml
-import os
-import time
+import asyncio
 import logging
 import random
-from typing import List, Dict, Any
-from urllib.parse import unquote
-from html import unescape
-import re
-import orjson
-from curl_cffi import requests as curl_requests
-from tenacity import retry, stop_after_attempt, wait_exponential, wait_random, retry_if_exception_type, before_sleep_log, RetryError, after_log
-import asyncio
-from functools import lru_cache
+import time
+import os
+import requests
+from typing import List, Dict, Any, Optional
+from duckduckgo_search import DDGS
+from duckduckgo_search.exceptions import RatelimitException, DuckDuckGoSearchException
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from src.config import Config
 from src.utils.token_tracker import TokenTracker
-from datetime import datetime, timedelta
+import socket
+from urllib.parse import quote_plus
+from dotenv import load_dotenv
+import aiohttp
+import json
+import re
 
-# Set up logger
+# Load environment variables from .env file
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
-class AsyncCache:
-    def __init__(self, max_size=1000, ttl=3600):
-        self.cache = {}
-        self.max_size = max_size
-        self.ttl = ttl
-        self.lock = asyncio.Lock()
+# Tor SOCKS5 proxy address
+TOR_PROXY = "socks5://127.0.0.1:9150"
 
-    async def get(self, key):
-        async with self.lock:
-            entry = self.cache.get(key)
-            if entry and (time.time() - entry['time']) < self.ttl:
-                return entry['value']
-            if key in self.cache:
-                del self.cache[key]
-            return None
-
-    async def set(self, key, value):
-        async with self.lock:
-            if len(self.cache) >= self.max_size:
-                # Remove oldest
-                oldest = min(self.cache.items(), key=lambda x: x[1]['time'])[0]
-                del self.cache[oldest]
-            self.cache[key] = {'value': value, 'time': time.time()}
+def is_tor_running() -> bool:
+    """Check if Tor SOCKS5 proxy is running on localhost:9150."""
+    try:
+        sock = socket.create_connection(("127.0.0.1", 9150), timeout=2)
+        sock.close()
+        return True
+    except Exception:
+        return False
 
 class SearchEngine:
-    _cache = AsyncCache()
-    _rate_limit = {}
-    _config = Config()
-    _token_tracker = TokenTracker()
-
-    def __init__(self):
-        config_dict = self._config.get_config()
-        self.config = config_dict.get('search_engines', {})
-        self.primary_engine = self.config.get('primary', 'duckduckgo')
-        self.fallbacks = self.config.get('fallbacks', {})
-        self.ddg_config = config_dict.get('duckduckgo', {})
-        self.requests_per_minute = self.ddg_config.get('rate_limit_max_requests', 60)
-        self.max_retries = self.ddg_config.get('max_retries', 3)
-        self.retry_delay = self.ddg_config.get('request_delay', 1)
-        self.backoff_factor = self.ddg_config.get('backoff_factor', 2)
-        self.timeout = self.ddg_config.get('timeout', 30)
-        self.pricing = self.config.get('pricing', {})
-        self.query_result = None
+    """Search engine implementation using DuckDuckGo."""
+    
+    # List of modern browser user agents
+    USER_AGENTS = [
+        # Chrome on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        # Firefox on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+        # Edge on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+        # Safari on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        # Chrome on Linux
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
+    
+    # Common referrers to make requests look more natural
+    REFERRERS = [
+        "https://www.google.com/",
+        "https://www.bing.com/",
+        "https://duckduckgo.com/",
+        "https://www.reddit.com/",
+        "https://www.wikipedia.org/"
+    ]
+    
+    # List of domains to exclude (video sites, social media, etc.)
+    EXCLUDED_DOMAINS = [
+        'youtube.com',
+        'youtu.be',
+        'vimeo.com',
+        'dailymotion.com',
+        'facebook.com',
+        'twitter.com',
+        'instagram.com',
+        'tiktok.com',
+        'linkedin.com',
+        'reddit.com',
+        'pinterest.com',
+        'tumblr.com',
+        'flickr.com',
+        'imgur.com',
+        'slideshare.net',
+        'prezi.com',
+        'docs.google.com',
+        'drive.google.com',
+        'dropbox.com',
+        'onedrive.live.com',
+        'box.com',
+        'mega.nz',
+        'mediafire.com',
+        'wetransfer.com',
+        'sendspace.com',
+        'rapidshare.com',
+        '4shared.com',
+        'scribd.com',
+        'issuu.com',
+        'slides.com',
+        'speakerdeck.com',
+        'slideshare.net',
+        'prezi.com',
+        'docs.google.com',
+        'drive.google.com',
+        'dropbox.com',
+        'onedrive.live.com',
+        'box.com',
+        'mega.nz',
+        'mediafire.com',
+        'wetransfer.com',
+        'sendspace.com',
+        'rapidshare.com',
+        '4shared.com',
+        'scribd.com',
+        'issuu.com',
+        'slides.com',
+        'speakerdeck.com'
+    ]
+    
+    def __init__(self, config: Config):
+        """Initialize search engine with configuration."""
+        self.config = config
+        self.token_tracker = TokenTracker(config)
+        self.ddgs = None
+        self._last_request_time = 0
+        self._min_delay = 2.0
+        self._max_delay = 4.0
+        self._max_retries = 3
+        self._retry_delay = 5.0  # Base delay for retries
+        # Get API keys directly from config attributes
+        self.google_api_key = config.google_api_key
+        self.google_cse_id = config.google_cse_id
+        self.tavily_api_key = config.tavily_api_key
         
-        # DuckDuckGo specific settings
-        self.request_delay = self.ddg_config.get('request_delay', 3.0)
-        self.max_retries = self.ddg_config.get('max_retries', 5)
-        self.timeout = self.ddg_config.get('timeout', 20)
-        self.backoff_factor = self.ddg_config.get('backoff_factor', 2.0)
-        self.jitter = self.ddg_config.get('jitter', True)
-        self.rate_limit_window = self.ddg_config.get('rate_limit_window', 600)
-        self.max_incidents_before_extended_backoff = self.ddg_config.get('max_incidents_before_extended_backoff', 3)
-        self.extended_backoff_time = self.ddg_config.get('extended_backoff_time', 1800)
-        self.daily_request_limit = self.ddg_config.get('daily_request_limit', 100)
-        self.rotate_user_agent_every = self.ddg_config.get('rotate_user_agent_every', 2)
-        self.ip_rotation_enabled = self.ddg_config.get('ip_rotation_enabled', True)
-        self.ip_rotation_frequency = self.ddg_config.get('ip_rotation_frequency', 5)
-        self.regions = self.ddg_config.get('regions', ["wt-wt", "us-en", "uk-en"])
+        # Debug log the actual values (first few characters only)
+        logger.info(f"Google API Key: {self.google_api_key[:8]}..." if self.google_api_key else "Not set")
+        logger.info(f"Google CSE ID: {self.google_cse_id[:8]}..." if self.google_cse_id else "Not set")
+        logger.info(f"Tavily API Key: {self.tavily_api_key[:8]}..." if self.tavily_api_key else "Not set")
         
-        # Initialize tracking variables
-        self.last_request_time = 0
-        self.last_success_time = 0
-        self.rate_limit_incidents = []
-        self.extended_backoff_until = 0
-        self.session_id = random.randint(1000000, 9999999)
-        self.request_counter_file = os.path.join(os.path.dirname(__file__), '.ddg_request_counter')
-        self.daily_request_count = self._load_request_count()
-        self.request_count = 0
-        self.used_user_agents = set()
-        self.current_region_index = 0
-
-    def _load_config(self):
-        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.yaml')
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-
-    def _load_request_count(self):
-        try:
-            if os.path.exists(self.request_counter_file):
-                with open(self.request_counter_file, 'r') as f:
-                    data = f.read().strip().split(',')
-                    if len(data) == 2:
-                        date_str, count_str = data
-                        today = time.strftime('%Y-%m-%d')
-                        if date_str == today and count_str.isdigit():
-                            return int(count_str)
-        except Exception as e:
-            logger.warning(f"Error loading request count: {e}")
-        return 0
-
-    def _save_request_count(self):
-        try:
-            today = time.strftime('%Y-%m-%d')
-            with open(self.request_counter_file, 'w') as f:
-                f.write(f"{today},{self.daily_request_count}")
-        except Exception as e:
-            logger.warning(f"Error saving request count: {e}")
-
-    def _rotate_region(self):
-        self.current_region_index = (self.current_region_index + 1) % len(self.regions)
-        return self.regions[self.current_region_index]
-
-    def _get_fresh_user_agent(self):
-        ua_list = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36 Edg/92.0.902.78",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64; rv:90.0) Gecko/20100101 Firefox/90.0",
-            "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
-        ]
+        logger.info(f"Search engine initialized with Google API: {bool(self.google_api_key)}, Tavily API: {bool(self.tavily_api_key)}")
+        if not self.google_api_key:
+            logger.warning("Google API key not found. Please set GOOGLE_API_KEY in .env file")
+        if not self.google_cse_id:
+            logger.warning("Google CSE ID not found. Please set GOOGLE_CSE_ID in .env file")
+        if not self.tavily_api_key:
+            logger.warning("Tavily API key not found. Please set TAVILY_API_KEY in .env file")
+        self._request_count = 0
+        self._max_requests_before_delay = 2  # Reduced number of requests before delay
+        self._long_delay_interval = 15.0  # Increased delay after multiple requests
+        self._session = None
         
-        available_user_agents = [ua for ua in ua_list if ua not in self.used_user_agents]
+    def _get_random_headers(self) -> Dict[str, str]:
+        """Generate random headers for each request."""
+        user_agent = random.choice(self.USER_AGENTS)
+        referrer = random.choice(self.REFERRERS)
         
-        if not available_user_agents and ua_list:
-            recent_agents = list(self.used_user_agents)[-3:] if len(self.used_user_agents) > 3 else self.used_user_agents
-            self.used_user_agents = set(recent_agents)
-            available_user_agents = [ua for ua in ua_list if ua not in self.used_user_agents]
-        
-        if available_user_agents:
-            selected_ua = random.choice(available_user_agents)
-            self.used_user_agents.add(selected_ua)
-            return selected_ua
-            
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Safari/537.36"
-
-    def _is_rate_limit_error(self, exception):
-        error_str = str(exception).lower()
-        return any(term in error_str for term in ["rate", "limit", "429", "too many requests", "ratelimit", "202", "blocked"])
-
-    def _record_rate_limit_incident(self):
-        now = time.time()
-        self.rate_limit_incidents.append(now)
-        self.rate_limit_incidents = [t for t in self.rate_limit_incidents if now - t <= self.rate_limit_window]
-        
-        if len(self.rate_limit_incidents) >= self.max_incidents_before_extended_backoff:
-            logger.warning(f"Too many rate limit incidents ({len(self.rate_limit_incidents)}). Enabling extended backoff.")
-            self.extended_backoff_until = now + self.extended_backoff_time
-
-    def _should_apply_extended_backoff(self):
-        return time.time() < self.extended_backoff_until
-
-    def _get_success_interval(self):
-        if self.last_success_time == 0:
-            return float('inf')
-        return time.time() - self.last_success_time
-
-    def _random_jitter(self, base=1, deviation=2):
-        return random.uniform(base, base + deviation)
-
-    async def search(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        cache_key = (self.primary_engine, query, max_results)
-        cached = await self._cache.get(cache_key)
-        if cached:
-            logger.info(f"Search cache hit for {cache_key}")
-            return cached
-
-        # Rate limiting
-        now = datetime.utcnow()
-        window = now.replace(second=0, microsecond=0)
-        if self.primary_engine not in self._rate_limit:
-            self._rate_limit[self.primary_engine] = {}
-        if window not in self._rate_limit[self.primary_engine]:
-            self._rate_limit[self.primary_engine][window] = 0
-        if self._rate_limit[self.primary_engine][window] >= self.requests_per_minute:
-            logger.warning(f"Search rate limit exceeded for {self.primary_engine}")
-            await asyncio.sleep(60)
-        self._rate_limit[self.primary_engine][window] += 1
-
-        # Error handling and retries
-        attempt = 0
-        while attempt < self.max_retries:
-            try:
-                if self.primary_engine == "duckduckgo":
-                    results = await self._duckduckgo_search(query, max_results)
-                else:
-                    raise Exception(f"Unsupported search engine: {self.primary_engine}")
-                await self._cache.set(cache_key, results)
-                # Cost tracking (approximate)
-                self._token_tracker.track_usage(
-                    self.primary_engine,
-                    query,
-                    str(results),
-                    {"type": "search", "engine": self.primary_engine}
-                )
-                return results
-            except Exception as e:
-                logger.error(f"Search error: {str(e)} (attempt {attempt+1})")
-                await asyncio.sleep(self.retry_delay * (self.backoff_factor ** attempt))
-                attempt += 1
-        raise RuntimeError(f"Search failed after {self.max_retries} attempts")
-
-    async def _duckduckgo_search(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        session = curl_requests.Session(impersonate="chrome", allow_redirects=False)
-        session.headers["Referer"] = "https://duckduckgo.com/"
-
-        # Get initial page to get vqd
-        resp = session.post("https://duckduckgo.com/", data={"q": query})
-        if resp.status_code != 200:
-            raise Exception(f"DuckDuckGo request failed with status {resp.status_code}")
-
-        vqd = self._extract_vqd(resp.content)
-        if not vqd:
-            raise Exception("Could not extract vqd from DuckDuckGo response")
-
-        # Get search results
-        params = {
-            "q": query,
-            "kl": self._rotate_region(),
-            "p": "1",
-            "s": "0",
-            "df": "",
-            "vqd": vqd,
-            "ex": ""
+        return {
+            'User-Agent': user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-User': '?1',
+            'Referer': referrer,
+            'Cache-Control': 'max-age=0'
         }
         
-        # Rotate user agent if needed
-        if self.request_count % self.rotate_user_agent_every == 0:
-            user_agent = self._get_fresh_user_agent()
-            if user_agent:
-                session.headers["User-Agent"] = user_agent
-
-        resp = session.get("https://links.duckduckgo.com/d.js", params=params)
-        if resp.status_code != 200:
-            raise Exception(f"DuckDuckGo search failed with status {resp.status_code}")
-
-        page_data = self._text_extract_json(resp.content)
-        if not page_data:
-            raise Exception("Could not extract search results from DuckDuckGo response")
-
-        results = []
-        for row in page_data:
-            href = row.get("u")
-            if href and href != f"http://www.google.com/search?q={query}":
-                body = self._normalize(row["a"])
-                if body:
-                    result = {
-                        "title": self._normalize(row["t"]),
-                        "href": self._normalize_url(href),
-                        "body": body,
-                    }
-                    results.append(result)
-                    
-                    if len(results) >= max_results:
-                        break
-
-        self.query_result = results
-        self.last_success_time = time.time()
-        self.request_count += 1
-        self.daily_request_count += 1
-        self._save_request_count()
+    def _wait_before_request(self):
+        """Add a random delay between requests."""
+        current_time = time.time()
+        time_since_last = current_time - self._last_request_time
+        if time_since_last < self._min_delay:
+            delay = random.uniform(self._min_delay, self._max_delay)
+            logger.info(f"Waiting {delay:.1f} seconds before next request...")
+            time.sleep(delay)
+        self._last_request_time = time.time()
         
+    def _rate_limit(self):
+        """Implement smart rate limiting with exponential backoff."""
+        current_time = time.time()
+        time_since_last = current_time - self._last_request_time
+        
+        # Increment request counter
+        self._request_count += 1
+        
+        # If we've made multiple requests, add a longer delay
+        if self._request_count >= self._max_requests_before_delay:
+            sleep_time = self._long_delay_interval
+            self._request_count = 0
+        else:
+            # Normal rate limiting
+            if time_since_last < self._min_delay:
+                sleep_time = self._min_delay - time_since_last
+            else:
+                sleep_time = 0
+                
+        if sleep_time > 0:
+            # Add some randomness to the delay
+            sleep_time += random.uniform(1.0, 2.0)
+            time.sleep(sleep_time)
+            
+        self._last_request_time = time.time()
+        
+    async def _duckduckgo_search(self, query: str, max_results: int) -> List[Dict[str, str]]:
+        """Search using DuckDuckGo."""
+        try:
+            if not self.ddgs:
+                self.ddgs = DDGS()
+            
+            self._wait_before_request()
+            results = []
+            
+            for r in self.ddgs.text(query, max_results=max_results):
+                results.append({
+                    'title': r['title'],
+                    'link': r['link'],
+                    'snippet': r['body']
+                })
+            
+            return results
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {str(e)}")
+            return []
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create an aiohttp session."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    def _is_valid_url(self, url: str) -> bool:
+        """Check if URL is valid for scraping."""
+        try:
+            # Extract domain from URL
+            domain = re.search(r'https?://(?:www\.)?([^/]+)', url)
+            if not domain:
+                return False
+            
+            domain = domain.group(1).lower()
+            
+            # Check if domain is in excluded list
+            if any(excluded in domain for excluded in self.EXCLUDED_DOMAINS):
+                logger.debug(f"Excluding URL from excluded domain: {url}")
+                return False
+            
+            # Check if URL is a file download
+            if any(ext in url.lower() for ext in ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.zip', '.rar', '.7z', '.tar', '.gz']):
+                logger.debug(f"Excluding URL as it's a file download: {url}")
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error checking URL validity: {str(e)}")
+            return False
+
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """Search using multiple engines and combine results."""
+        results = []
+        
+        # Try Google Custom Search
+        if self.google_api_key and self.google_cse_id:
+            try:
+                logger.info("Attempting Google search...")
+                google_results = self._google_search(query, max_results)
+                logger.info(f"Google search returned {len(google_results)} results")
+                results.extend(google_results)
+            except Exception as e:
+                logger.error(f"Google search failed: {str(e)}")
+        
+        # Try Tavily
+        if self.tavily_api_key:
+            try:
+                logger.info("Attempting Tavily search...")
+                tavily_results = self._tavily_search(query, max_results)
+                logger.info(f"Tavily search returned {len(tavily_results)} results")
+                results.extend(tavily_results)
+            except Exception as e:
+                logger.error(f"Tavily search failed: {str(e)}")
+                if "401" in str(e):
+                    logger.error("Tavily API key appears to be invalid. Please check your API key.")
+        
+        if not results:
+            logger.warning("No results found from any search engine")
+            return []
+        
+        # Remove duplicates and invalid URLs
+        seen_urls = set()
+        unique_results = []
+        for result in results:
+            if result['link'] not in seen_urls and self._is_valid_url(result['link']):
+                seen_urls.add(result['link'])
+                unique_results.append(result)
+        
+        logger.info(f"Returning {len(unique_results)} unique and valid results")
+        return unique_results[:max_results]
+
+    def _google_search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+        """Search using Google Custom Search API."""
+        url = "https://www.googleapis.com/customsearch/v1"
+        
+        # Debug log the actual values being used
+        logger.debug(f"Using Google API Key: {self.google_api_key[:8]}...")
+        logger.debug(f"Using Google CSE ID: {self.google_cse_id[:8]}...")
+        
+        params = {
+            'key': self.google_api_key,
+            'cx': self.google_cse_id,
+            'q': query,
+            'num': min(max_results * 2, 10)  # Request more results to account for filtering
+        }
+        
+        logger.debug(f"Google search URL: {url}")
+        logger.debug(f"Google search params: {params}")
+        
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        if 'items' not in data:
+            logger.warning(f"Google search returned no items. Response: {data}")
+            return []
+        
+        results = []
+        for item in data['items']:
+            if self._is_valid_url(item.get('link', '')):
+                results.append({
+                    'title': item.get('title', ''),
+                    'link': item.get('link', ''),
+                    'snippet': item.get('snippet', '')
+                })
         return results
 
-    def _tavily_search(self, query: str, api_key: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    def _tavily_search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+        """Search using Tavily API."""
+        url = "https://api.tavily.com/search"
+        
+        # Debug log the actual values being used
+        logger.debug(f"Using Tavily API Key: {self.tavily_api_key[:8]}...")
+        
+        # Ensure API key is properly formatted
+        api_key = self.tavily_api_key.strip()
+        if not api_key.startswith('tvly-'):
+            logger.warning("Tavily API key should start with 'tvly-'. Please check your API key.")
+        
         headers = {
             "X-Api-Key": api_key,
             "Content-Type": "application/json"
@@ -290,136 +349,96 @@ class SearchEngine:
         data = {
             "query": query,
             "search_depth": "basic",
-            "max_results": max_results
+            "max_results": max_results * 2  # Request more results to account for filtering
         }
         
-        response = requests.post(
-            "https://api.tavily.com/search",
-            headers=headers,
-            json=data
-        )
+        logger.debug(f"Tavily search URL: {url}")
+        logger.debug(f"Tavily search headers: {headers}")
+        logger.debug(f"Tavily search data: {data}")
         
-        if response.status_code != 200:
-            raise Exception(f"Tavily API request failed with status {response.status_code}")
-            
-        results = response.json()["results"]
-        self.query_result = [{
-            "title": result["title"],
-            "href": result["url"],
-            "body": result["content"]
-        } for result in results]
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        data = response.json()
         
-        return self.query_result
-
-    def _google_search(self, query: str, api_key: str, search_engine_id: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        params = {
-            "key": api_key,
-            "cx": search_engine_id,
-            "q": query
-        }
+        if 'results' not in data:
+            logger.warning(f"Tavily search returned no results. Response: {data}")
+            return []
         
-        response = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params=params
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"Google API request failed with status {response.status_code}")
-            
-        results = response.json().get("items", [])
-        self.query_result = [{
-            "title": result["title"],
-            "href": result["link"],
-            "body": result.get("snippet", "")
-        } for result in results]
-        
-        return self.query_result
-
-    def get_first_link(self):
-        if not self.query_result:
-            return None
-        return self.query_result[0]["href"]
-
-    @staticmethod
-    def _extract_vqd(html_bytes: bytes) -> str:
-        patterns = [(b'vqd="', 5, b'"'), (b"vqd=", 4, b"&"), (b"vqd='", 5, b"'")]
-        for start_pattern, offset, end_pattern in patterns:
-            try:
-                start = html_bytes.index(start_pattern) + offset
-                end = html_bytes.index(end_pattern, start)
-                return html_bytes[start:end].decode()
-            except ValueError:
-                continue
-        return None
-
-    @staticmethod
-    def _text_extract_json(html_bytes):
-        try:
-            start = html_bytes.index(b"DDG.pageLayout.load('d',") + 24
-            end = html_bytes.index(b");DDG.duckbar.load(", start)
-            return orjson.loads(html_bytes[start:end])
-        except Exception as ex:
-            logger.error(f"Error extracting JSON: {type(ex).__name__}: {ex}")
-            return None
-
-    @staticmethod
-    def _normalize_url(url: str) -> str:
-        return unquote(url.replace(" ", "+")) if url else ""
-
-    @staticmethod
-    def _normalize(raw_html: str) -> str:
-        return unescape(re.sub("<.*?>", "", raw_html)) if raw_html else ""
-
-    def _generate_placeholder_results(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         results = []
-        for i in range(max_results):
-            results.append({
-                "title": f"Search result {i+1} for '{query}'" if i == 0 else f"Alternative search result for '{query}'",
-                "body": "Search could not be completed. Please try again later or refine your search query.",
-                "href": "https://duckduckgo.com/?q=" + query.replace(" ", "+")
-            })
+        for result in data['results']:
+            if self._is_valid_url(result.get('url', '')):
+                results.append({
+                    'title': result.get('title', ''),
+                    'link': result.get('url', ''),
+                    'snippet': result.get('content', '')
+                })
         return results
 
-class BingSearch(SearchEngine):
-    def __init__(self):
-        super().__init__()
-        self.primary_engine = 'bing'
-        self.bing_config = self._config.get('search_engines', {}).get('bing', {})
-        self.api_key = self.bing_config.get('api_key', '')
-        self.endpoint = self.bing_config.get('endpoint', 'https://api.bing.microsoft.com/v7.0/search')
-
-    async def search(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        if not self.api_key:
-            raise ValueError("Bing API key not configured")
-
-        headers = {
-            'Ocp-Apim-Subscription-Key': self.api_key,
-            'Accept': 'application/json'
-        }
-
-        params = {
-            'q': query,
-            'count': max_results,
-            'responseFilter': 'Webpages',
-            'textFormat': 'Raw',
-            'safeSearch': 'Moderate'
-        }
-
+    async def is_available(self) -> bool:
+        """Check if any search engine is available."""
+        # Try DuckDuckGo first
         try:
-            response = requests.get(self.endpoint, headers=headers, params=params)
-            response.raise_for_status()
-            data = response.json()
+            if not self.ddgs:
+                self.ddgs = DDGS()
+            next(self.ddgs.text("test", max_results=1))
+            return True
+        except Exception:
+            pass
 
-            results = []
-            if 'webPages' in data and 'value' in data['webPages']:
-                for item in data['webPages']['value']:
-                    results.append({
-                        'title': item.get('name', ''),
-                        'link': item.get('url', ''),
-                        'snippet': item.get('snippet', '')
-                    })
+        # Try Tavily
+        if self.tavily_api_key:
+            try:
+                url = "https://api.tavily.com/search"
+                headers = {"Authorization": f"Bearer {self.tavily_api_key}"}
+                data = {"query": "test", "search_depth": "basic"}
+                response = requests.post(url, headers=headers, json=data)
+                response.raise_for_status()
+                return True
+            except Exception:
+                pass
 
-            return results
-        except Exception as e:
-            logger.error(f"Bing search error: {str(e)}")
-            return []
+        # Try Google
+        if self.google_api_key and self.google_cse_id:
+            try:
+                url = "https://www.googleapis.com/customsearch/v1"
+                params = {
+                    "key": self.google_api_key,
+                    "cx": self.google_cse_id,
+                    "q": "test"
+                }
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+                return True
+            except Exception:
+                pass
+
+        logger.error("No search engines available")
+        return False
+
+    def get_first_link(self) -> Optional[str]:
+        """Get the first link from search results."""
+        if not self.search_results:
+            return None
+            
+        return self.search_results[0].get("link")
+
+    def next_page(self) -> bool:
+        """Move to the next page of results."""
+        if self.current_page >= self.max_pages:
+            return False
+            
+        self.current_page += 1
+        return True
+
+    def previous_page(self) -> bool:
+        """Move to the previous page of results."""
+        if self.current_page <= 1:
+            return False
+            
+        self.current_page -= 1
+        return True
+
+    async def close(self):
+        """Close the aiohttp session."""
+        if self._session and not self._session.closed:
+            await self._session.close() 

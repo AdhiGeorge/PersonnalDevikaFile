@@ -1,6 +1,84 @@
 import json
+import sys
+import time
+from functools import wraps
+import logging
+from typing import Any, Dict
 from src.agents.base_agent import BaseAgent
-from src.services.utils import retry_wrapper, validate_responses
+
+logger = logging.getLogger(__name__)
+
+def retry_wrapper(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        max_tries = 5
+        tries = 0
+        while tries < max_tries:
+            result = func(*args, **kwargs)
+            if result:
+                return result
+            logger.warning("Invalid response from the model, trying again...")
+            tries += 1
+            time.sleep(2)
+        logger.error("Maximum 5 attempts reached. Model keeps failing.")
+        sys.exit(1)
+    return wrapper
+
+class InvalidResponseError(Exception):
+    pass
+
+def validate_responses(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        args = list(args)
+        response = args[1]
+        response = response.strip()
+
+        try:
+            response = json.loads(response)
+            args[1] = response
+            return func(*args, **kwargs)
+
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            response = response.split("```")[1]
+            if response:
+                response = json.loads(response.strip())
+                args[1] = response
+                return func(*args, **kwargs)
+
+        except (IndexError, json.JSONDecodeError):
+            pass
+
+        try:
+            start_index = response.find('{')
+            end_index = response.rfind('}')
+            if start_index != -1 and end_index != -1:
+                json_str = response[start_index:end_index+1]
+                try:
+                    response = json.loads(json_str)
+                    args[1] = response
+                    return func(*args, **kwargs)
+
+                except json.JSONDecodeError:
+                    pass
+        except json.JSONDecodeError:
+            pass
+
+        for line in response.splitlines():
+            try:
+                response = json.loads(line)
+                args[1] = response
+                return func(*args, **kwargs)
+
+            except json.JSONDecodeError:
+                pass
+
+        raise InvalidResponseError("Failed to parse response as JSON")
+
+    return wrapper
 
 class InternalMonologue(BaseAgent):
     def __init__(self, base_model: str):
@@ -25,9 +103,9 @@ class InternalMonologue(BaseAgent):
             return False
 
     @retry_wrapper
-    def execute(self, current_prompt: str, project_name: str) -> str:
+    async def execute(self, current_prompt: str, project_name: str) -> str:
         """Execute the internal monologue agent."""
         prompt = self.format_prompt(current_prompt)
-        response = self.llm.inference(prompt, project_name)
-        return self.validate_response(response)
+        response = await self.llm.chat_completion([{"role": "user", "content": prompt}], self.base_model)
+        return self.validate_response(response.choices[0].message.content)
 

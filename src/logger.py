@@ -1,7 +1,7 @@
 from functools import wraps
 
 from fastlogging import LogInit
-from flask import request
+# from flask import request
 
 from src.config import Config
 
@@ -37,45 +37,45 @@ class Logger:
         self.logger.flush()
 
 
-def route_logger(logger: Logger):
-    """
-    Decorator factory that creates a decorator to log route entry and exit points.
-    The decorator uses the provided logger to log the information.
-
-    :param logger: The logger instance to use for logging.
-    """
-
-    log_enabled = Config().get_logging_rest_api()
-
-    def decorator(func):
-
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Log entry point
-            if log_enabled:
-                logger.info(f"{request.path} {request.method}")
-
-            # Call the actual route function
-            response = func(*args, **kwargs)
-
-            from werkzeug.wrappers import Response
-
-            # Log exit point, including response summary if possible
-            try:
-                if log_enabled:
-                    if isinstance(response, Response) and response.direct_passthrough:
-                        logger.debug(f"{request.path} {request.method} - Response: File response")
-                    else:
-                        response_summary = response.get_data(as_text=True)
-                        if 'settings' in request.path:
-                            response_summary = "*** Settings are not logged ***"
-                        logger.debug(f"{request.path} {request.method} - Response: {response_summary}")
-            except Exception as e:
-                logger.exception(f"{request.path} {request.method} - {e})")
-
-            return response
-        return wrapper
-    return decorator
+# def route_logger(logger: Logger):
+#     """
+#     Decorator factory that creates a decorator to log route entry and exit points.
+#     The decorator uses the provided logger to log the information.
+#
+#     :param logger: The logger instance to use for logging.
+#     """
+#
+#     log_enabled = Config().get_logging_rest_api()
+#
+#     def decorator(func):
+#
+#         @wraps(func)
+#         def wrapper(*args, **kwargs):
+#             # Log entry point
+#             if log_enabled:
+#                 logger.info(f"{request.path} {request.method}")
+#
+#             # Call the actual route function
+#             response = func(*args, **kwargs)
+#
+#             from werkzeug.wrappers import Response
+#
+#             # Log exit point, including response summary if possible
+#             try:
+#                 if log_enabled:
+#                     if isinstance(response, Response) and response.direct_passthrough:
+#                         logger.debug(f"{request.path} {request.method} - Response: File response")
+#                     else:
+#                         response_summary = response.get_data(as_text=True)
+#                         if 'settings' in request.path:
+#                             response_summary = "*** Settings are not logged ***"
+#                         logger.debug(f"{request.path} {request.method} - Response: {response_summary}")
+#             except Exception as e:
+#                 logger.exception(f"{request.path} {request.method} - {e})")
+#
+#             return response
+#         return wrapper
+#     return decorator
 
 
 if __name__ == "__main__":

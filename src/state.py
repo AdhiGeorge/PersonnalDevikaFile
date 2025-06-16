@@ -1,9 +1,8 @@
 import json
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from sqlmodel import Field, Session, SQLModel, create_engine
-from src.socket_instance import emit_agent
 from src.config import Config
 
 
@@ -45,7 +44,8 @@ class AgentState:
             "completed": False,
             "agent_is_active": True,
             "token_usage": 0,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "step_results": {}  # Add step_results to store results for each step
         }
 
     def create_state(self, project: str):
@@ -56,7 +56,6 @@ class AgentState:
             agent_state = AgentStateModel(project=project, state_stack_json=json.dumps([new_state]))
             session.add(agent_state)
             session.commit()
-            emit_agent("agent-state", [new_state])
 
     def delete_state(self, project: str):
         with Session(self.engine) as session:
@@ -79,7 +78,6 @@ class AgentState:
                 agent_state = AgentStateModel(project=project, state_stack_json=json.dumps(state_stack))
                 session.add(agent_state)
                 session.commit()
-            emit_agent("agent-state", state_stack)
 
     def get_current_state(self, project: str):
         with Session(self.engine) as session:
@@ -101,7 +99,6 @@ class AgentState:
                 agent_state = AgentStateModel(project=project, state_stack_json=json.dumps(state_stack))
                 session.add(agent_state)
                 session.commit()
-            emit_agent("agent-state", state_stack)
 
     def get_latest_state(self, project: str):
         with Session(self.engine) as session:
@@ -124,7 +121,6 @@ class AgentState:
                 agent_state = AgentStateModel(project=project, state_stack_json=json.dumps(state_stack))
                 session.add(agent_state)
                 session.commit()
-            emit_agent("agent-state", state_stack)
 
     def is_agent_active(self, project: str):
         with Session(self.engine) as session:
@@ -148,7 +144,6 @@ class AgentState:
                 agent_state = AgentStateModel(project=project, state_stack_json=json.dumps(state_stack))
                 session.add(agent_state)
                 session.commit()
-            emit_agent("agent-state", state_stack)
 
     def is_agent_completed(self, project: str):
         with Session(self.engine) as session:
@@ -178,6 +173,46 @@ class AgentState:
             if agent_state:
                 return json.loads(agent_state.state_stack_json)[-1]["token_usage"]
             return 0
+
+    def add_step_result(self, project: str, step_id: int, result: Any):
+        """Add a result for a specific step."""
+        with Session(self.engine) as session:
+            agent_state = session.query(AgentStateModel).filter(AgentStateModel.project == project).first()
+            if agent_state:
+                state_stack = json.loads(agent_state.state_stack_json)
+                if "step_results" not in state_stack[-1]:
+                    state_stack[-1]["step_results"] = {}
+                state_stack[-1]["step_results"][str(step_id)] = result
+                agent_state.state_stack_json = json.dumps(state_stack)
+                session.commit()
+            else:
+                state_stack = [self.new_state()]
+                state_stack[-1]["step_results"][str(step_id)] = result
+                agent_state = AgentStateModel(project=project, state_stack_json=json.dumps(state_stack))
+                session.add(agent_state)
+                session.commit()
+
+    def get_step_result(self, project: str, step_id: int) -> Any:
+        """Get the result for a specific step."""
+        with Session(self.engine) as session:
+            agent_state = session.query(AgentStateModel).filter(AgentStateModel.project == project).first()
+            if agent_state:
+                state_stack = json.loads(agent_state.state_stack_json)
+                return state_stack[-1].get("step_results", {}).get(str(step_id))
+            return None
+
+    def is_step_completed(self, project: str, step_id: int) -> bool:
+        """Check if a specific step is completed."""
+        return self.get_step_result(project, step_id) is not None
+
+    def get_all_step_results(self, project: str) -> dict:
+        """Get all step results."""
+        with Session(self.engine) as session:
+            agent_state = session.query(AgentStateModel).filter(AgentStateModel.project == project).first()
+            if agent_state:
+                state_stack = json.loads(agent_state.state_stack_json)
+                return state_stack[-1].get("step_results", {})
+            return {}
 
 if __name__ == "__main__":
     # Real, practical example usage of the AgentState

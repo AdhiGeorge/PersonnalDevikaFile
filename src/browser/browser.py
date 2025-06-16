@@ -1,111 +1,100 @@
-import asyncio
-import base64
-import os
+import logging
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
 
-from playwright.sync_api import sync_playwright, TimeoutError, Page
-from playwright.async_api import async_playwright, TimeoutError
-from markdownify import markdownify as md
-from pdfminer.high_level import extract_text
-from src.socket_instance import emit_agent
-from src.config import Config
-from src.state import AgentState
+logger = logging.getLogger(__name__)
 
+async def start_interaction(url: str) -> tuple:
+    """Start browser interaction with a URL.
+    
+    Args:
+        url: The URL to interact with
+        
+    Returns:
+        tuple: (browser instance, raw content, processed content)
+    """
+    browser = Browser()
+    try:
+        browser.start()
+        success = browser.go_to(url)
+        if not success:
+            return browser, None, None
+            
+        raw_content = browser.extract_text()
+        processed_content = raw_content.strip() if raw_content else None
+        
+        return browser, raw_content, processed_content
+    except Exception as e:
+        logger.error(f"Error in browser interaction: {str(e)}")
+        browser.close()
+        return browser, None, None
 
 class Browser:
     def __init__(self):
-        self.playwright = None
-        self.browser = None
-        self.page = None
-        self.agent = AgentState()
-        self.config = Config()
+        self.driver = None
+        self._started = False
 
-    async def start(self):
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=[
-                '--disable-gpu',
-                '--disable-dev-shm-usage',
-                '--disable-setuid-sandbox',
-                '--no-sandbox',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-            ]
-        )
-        self.page = await self.browser.new_page(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        )
-        
-        # Set default timeout
-        self.page.set_default_timeout(30000)  # 30 seconds
-        
-        # Enable JavaScript
-        await self.page.set_extra_http_headers({
-            'Accept-Language': 'en-US,en;q=0.9',
-        })
-        
-        return self
-
-    # def new_page(self):
-    #     return self.browser.new_page()
-
-    async def go_to(self, url):
+    def start(self):
+        """Start the browser."""
         try:
-            await self.page.goto(url, timeout=30000, wait_until='networkidle')
-        except TimeoutError as e:
-            print(f"TimeoutError: {e} when trying to navigate to {url}")
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+            
+            self.driver = webdriver.Chrome(options=chrome_options)
+            self.driver.set_page_load_timeout(30)  # 30 seconds timeout
+            self._started = True
+            logger.info("Browser started successfully")
+        except Exception as e:
+            logger.error(f"Error starting browser: {str(e)}")
+            raise
+
+    def go_to(self, url: str) -> bool:
+        """Navigate to a URL."""
+        try:
+            if not self._started:
+                raise Exception("Browser not initialized. Call start() first.")
+            self.driver.get(url)
+            # Wait for page to load
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error navigating to {url}: {str(e)}")
             return False
-        return True
 
-    async def screenshot(self, project_name):
-        screenshots_save_path = self.config.get_screenshots_dir()
+    def extract_text(self) -> str:
+        """Extract text content from the current page."""
+        try:
+            if not self._started:
+                raise Exception("Browser not initialized. Call start() first.")
+            # Wait for body to be present
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            # Get the text content
+            return self.driver.find_element(By.TAG_NAME, "body").text
+        except Exception as e:
+            logger.error(f"Error extracting text: {str(e)}")
+            return ""
 
-        page_metadata = await self.page.evaluate("() => { return { url: document.location.href, title: document.title } }")
-        page_url = page_metadata['url']
-        random_filename = os.urandom(20).hex()
-        filename_to_save = f"{random_filename}.png"
-        path_to_save = os.path.join(screenshots_save_path, filename_to_save)
-
-        await self.page.emulate_media(media="screen")
-        await self.page.screenshot(path=path_to_save, full_page=True)
-        screenshot = await self.page.screenshot()
-        screenshot_bytes = base64.b64encode(screenshot).decode()
-        new_state = self.agent.new_state()
-        new_state["internal_monologue"] = "Browsing the web right now..."
-        new_state["browser_session"]["url"] = page_url
-        new_state["browser_session"]["screenshot"] = path_to_save
-        self.agent.add_to_current_state(project_name, new_state)
-        # self.close()
-        return path_to_save, screenshot_bytes
-
-    def get_html(self):
-        return self.page.content()
-
-    def get_markdown(self):
-        return md(self.page.content())
-
-    def get_pdf(self):
-        pdfs_save_path = self.config.get_pdfs_dir()
-
-        page_metadata = self.page.evaluate("() => { return { url: document.location.href, title: document.title } }")
-        filename_to_save = f"{page_metadata['title']}.pdf"
-        save_path = os.path.join(pdfs_save_path, filename_to_save)
-
-        self.page.pdf(path=save_path)
-
-        return save_path
-
-    def pdf_to_text(self, pdf_path):
-        return extract_text(pdf_path).strip()
-
-    def get_content(self):
-        pdf_path = self.get_pdf()
-        return self.pdf_to_text(pdf_path)
-
-    async def extract_text(self):
-        return await self.page.evaluate("() => document.body.innerText")
-
-    async def close(self):
-        await self.page.close()
-        await self.browser.close()
+    def close(self):
+        """Close the browser and clean up resources."""
+        try:
+            if self._started and self.driver:
+                self.driver.quit()
+                self._started = False
+                logger.info("Browser closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing browser: {str(e)}")
+            raise

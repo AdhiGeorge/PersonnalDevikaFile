@@ -25,12 +25,14 @@ class KnowledgeBase:
         self.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
         self.embedding_model_name = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
         self.collection_name = os.getenv("QDRANT_COLLECTION", "agent_knowledge")
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY must be set in your .env file.")
         
-        # Initialize Qdrant client
-        self.client = QdrantClient(url=self.qdrant_url)
+        # Check for OpenAI or Azure OpenAI configuration
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        self.azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        
+        if not (self.openai_api_key or (self.azure_openai_api_key and self.azure_openai_endpoint)):
+            raise ValueError("Either OPENAI_API_KEY or (AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT) must be set in your .env file.")
         
         # Initialize embedding model based on configuration
         if self.embedding_model_name == "text-embedding-3-small":
@@ -40,13 +42,23 @@ class KnowledgeBase:
             self.use_openai = False
             self.embedding_model = SentenceTransformer(self.embedding_model_name)
         
-        # Ensure collection exists
-        self._ensure_collection()
+        # Initialize Qdrant client if available
+        self.use_qdrant = False
+        try:
+            self.client = QdrantClient(url=self.qdrant_url)
+            self._ensure_collection()
+            self.use_qdrant = True
+            logger.info(f"Knowledge base initialized with Qdrant at {self.qdrant_url}")
+        except Exception as e:
+            logger.warning(f"Qdrant not available: {str(e)}. Running without vector storage.")
         
         logger.info(f"Knowledge base initialized with model: {self.embedding_model_name}")
 
     def _ensure_collection(self):
         """Ensure the Qdrant collection exists with proper configuration."""
+        if not self.use_qdrant:
+            return
+            
         try:
             collections = self.client.get_collections().collections
             collection_names = [collection.name for collection in collections]
@@ -65,6 +77,7 @@ class KnowledgeBase:
                 logger.info(f"Created new collection: {self.collection_name}")
         except Exception as e:
             logger.error(f"Error ensuring collection exists: {str(e)}")
+            self.use_qdrant = False
             raise
 
     def _get_embedding(self, text: str) -> List[float]:
@@ -73,11 +86,25 @@ class KnowledgeBase:
             raise ValueError("Text for embedding must be a non-empty string.")
         try:
             if self.use_openai:
-                response = openai.Embedding.create(
-                    input=text,
-                    model=self.embedding_model_name,
-                    api_key=self.openai_api_key
-                )
+                if self.azure_openai_api_key and self.azure_openai_endpoint:
+                    # Use Azure OpenAI
+                    openai.api_type = "azure"
+                    openai.api_key = self.azure_openai_api_key
+                    openai.api_base = self.azure_openai_endpoint
+                    openai.api_version = os.getenv("AZURE_API_VERSION_EMBEDDINGS", "2023-05-15")
+                    deployment = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+                    response = openai.Embedding.create(
+                        input=text,
+                        model=deployment,
+                        api_key=self.azure_openai_api_key
+                    )
+                else:
+                    # Use OpenAI
+                    response = openai.Embedding.create(
+                        input=text,
+                        model=self.embedding_model_name,
+                        api_key=self.openai_api_key
+                    )
                 return response['data'][0]['embedding']
             else:
                 embedding = self.embedding_model.encode(text)
@@ -103,39 +130,41 @@ class KnowledgeBase:
         """
         if not text or not isinstance(metadata, dict):
             raise ValueError("Text and metadata are required.")
-        try:
-            # Generate embedding
-            vector = self._get_embedding(text)
             
-            # Prepare metadata
-            full_metadata = {
-                **metadata,
-                "text": text,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+        # Generate document ID if not provided
+        if not document_id:
+            document_id = f"doc_{datetime.utcnow().timestamp()}"
             
-            # Generate document ID if not provided
-            if not document_id:
-                document_id = f"doc_{datetime.utcnow().timestamp()}"
-            
-            # Add to Qdrant
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=[
-                    models.PointStruct(
-                        id=document_id,
-                        vector=vector,
-                        payload=full_metadata
-                    )
-                ]
-            )
-            
-            logger.info(f"Added document to knowledge base: {document_id}")
-            return document_id
-            
-        except Exception as e:
-            logger.error(f"Error adding document to knowledge base: {str(e)}")
-            raise
+        if self.use_qdrant:
+            try:
+                # Generate embedding
+                vector = self._get_embedding(text)
+                
+                # Prepare metadata
+                full_metadata = {
+                    **metadata,
+                    "text": text,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+                # Add to Qdrant
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=[
+                        models.PointStruct(
+                            id=document_id,
+                            vector=vector,
+                            payload=full_metadata
+                        )
+                    ]
+                )
+                
+                logger.info(f"Added document to knowledge base: {document_id}")
+            except Exception as e:
+                logger.error(f"Error adding document to knowledge base: {str(e)}")
+                self.use_qdrant = False
+                
+        return document_id
 
     def search(self, 
                query: str, 
@@ -154,6 +183,10 @@ class KnowledgeBase:
         """
         if not query:
             raise ValueError("Query must be a non-empty string.")
+            
+        if not self.use_qdrant:
+            return []
+            
         try:
             # Generate query embedding
             query_vector = self._get_embedding(query)
@@ -179,7 +212,8 @@ class KnowledgeBase:
             
         except Exception as e:
             logger.error(f"Error searching knowledge base: {str(e)}")
-            raise
+            self.use_qdrant = False
+            return []
 
     def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -191,21 +225,21 @@ class KnowledgeBase:
         Returns:
             The document metadata if found, None otherwise
         """
-        if not document_id:
-            raise ValueError("Document ID is required.")
+        if not document_id or not self.use_qdrant:
+            return None
+            
         try:
             result = self.client.retrieve(
                 collection_name=self.collection_name,
                 ids=[document_id]
             )
-            
             if result and len(result) > 0:
                 return result[0].payload
             return None
-            
         except Exception as e:
             logger.error(f"Error retrieving document: {str(e)}")
-            raise
+            self.use_qdrant = False
+            return None
 
     def delete_document(self, document_id: str) -> bool:
         """
@@ -217,8 +251,9 @@ class KnowledgeBase:
         Returns:
             True if successful, False otherwise
         """
-        if not document_id:
-            raise ValueError("Document ID is required.")
+        if not document_id or not self.use_qdrant:
+            return False
+            
         try:
             self.client.delete(
                 collection_name=self.collection_name,
@@ -226,11 +261,10 @@ class KnowledgeBase:
                     points=[document_id]
                 )
             )
-            logger.info(f"Deleted document from knowledge base: {document_id}")
             return True
-            
         except Exception as e:
             logger.error(f"Error deleting document: {str(e)}")
+            self.use_qdrant = False
             return False
 
     def update_document(self, 
@@ -238,7 +272,7 @@ class KnowledgeBase:
                        text: Optional[str] = None, 
                        metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Update an existing document in the knowledge base.
+        Update a document in the knowledge base.
         
         Args:
             document_id: The ID of the document to update
@@ -248,27 +282,25 @@ class KnowledgeBase:
         Returns:
             True if successful, False otherwise
         """
-        if not document_id:
-            raise ValueError("Document ID is required.")
-        try:
-            # Get existing document
-            existing = self.get_document(document_id)
-            if not existing:
-                return False
+        if not document_id or not self.use_qdrant:
+            return False
             
-            # Prepare new metadata
-            new_metadata = existing.copy()
+        try:
+            # Get current document
+            current = self.get_document(document_id)
+            if not current:
+                return False
+                
+            # Update fields
             if text:
-                new_metadata["text"] = text
+                current["text"] = text
                 vector = self._get_embedding(text)
             else:
-                vector = self._get_embedding(existing["text"])
-            
+                vector = self._get_embedding(current["text"])
+                
             if metadata:
-                new_metadata.update(metadata)
-            
-            new_metadata["updated_at"] = datetime.utcnow().isoformat()
-            
+                current.update(metadata)
+                
             # Update in Qdrant
             self.client.upsert(
                 collection_name=self.collection_name,
@@ -276,16 +308,14 @@ class KnowledgeBase:
                     models.PointStruct(
                         id=document_id,
                         vector=vector,
-                        payload=new_metadata
+                        payload=current
                     )
                 ]
             )
-            
-            logger.info(f"Updated document in knowledge base: {document_id}")
             return True
-            
         except Exception as e:
             logger.error(f"Error updating document: {str(e)}")
+            self.use_qdrant = False
             return False
 
     def clear_collection(self) -> bool:
@@ -295,25 +325,16 @@ class KnowledgeBase:
         Returns:
             True if successful, False otherwise
         """
-        try:
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=models.FilterSelector(
-                    filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="timestamp",
-                                match=models.MatchAny(any=["*"])
-                            )
-                        ]
-                    )
-                )
-            )
-            logger.info(f"Cleared collection: {self.collection_name}")
-            return True
+        if not self.use_qdrant:
+            return False
             
+        try:
+            self.client.delete_collection(collection_name=self.collection_name)
+            self._ensure_collection()
+            return True
         except Exception as e:
             logger.error(f"Error clearing collection: {str(e)}")
+            self.use_qdrant = False
             return False
 
 if __name__ == "__main__":

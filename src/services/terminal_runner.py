@@ -96,7 +96,7 @@ class TerminalRunner:
         """Run *command* and stream output via *on_update* callback.
 
         The callback receives the **cumulative** output each time a new line is
-        produced, allowing callers to push live updates (e.g. over Socket.IO).
+        produced, allowing callers to push live updates.
         """
 
         with tempfile.TemporaryDirectory() as tmpdir:

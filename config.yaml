@@ -15,20 +15,21 @@ azure_openai:
     output: 0.06  # per 1K tokens
 
 # Search Engine Configuration
-search_engines:
-  primary: "duckduckgo"
-  fallbacks:
+search:
+  enabled: true
+  engines:
+    duckduckgo:
+      enabled: true
+      max_results: 5
     tavily:
-      enabled: false
+      enabled: true
       api_key: ""  # Add your Tavily API key here
-      pricing:
-        basic: 0.10  # per request
+      max_results: 5
     google:
-      enabled: false
+      enabled: true
       api_key: ""  # Add your Google API key here
-      search_engine_id: ""  # Add your Google Search Engine ID here
-      pricing:
-        basic: 0.05  # per request
+      cx: ""       # Add your Google Custom Search Engine ID here
+      max_results: 5
 
 # Server Configuration
 server:
@@ -40,16 +41,10 @@ server:
     requests_per_minute: 60
     burst_size: 10
 
-# Frontend Configuration
-frontend:
-  url: "http://localhost:3000"
-  allowed_origins:
-    - "http://localhost:3000"
-    - "https://localhost:3000"
-
 # Logging Configuration
 logging:
-  level: "INFO"
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   log_prompts: true
   log_rest_api: true
   log_file: "logs/app.log"
@@ -167,9 +162,6 @@ monitoring:
     prometheus:
       enabled: true
       port: 9090
-    grafana:
-      enabled: true
-      port: 3000
   tracing:
     enabled: true
     jaeger:
@@ -185,4 +177,36 @@ monitoring:
         max_bytes: 10485760  # 10MB
         backup_count: 5
       - type: "console"
-        level: "INFO" 
+        level: "INFO"
+
+# Browser Configuration
+browser:
+  enabled: true
+  headless: true
+  timeout: 30
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+API_KEYS:
+  GOOGLE_SEARCH: "YOUR_GOOGLE_API_KEY"
+  GOOGLE_SEARCH_ENGINE_ID: "YOUR_GOOGLE_CSE_ID"
+  TAVILY: "YOUR_TAVILY_API_KEY"
+
+API_ENDPOINTS:
+  GOOGLE: "https://www.googleapis.com/customsearch/v1"
+  GOOGLE_SEARCH: "https://www.googleapis.com/customsearch/v1"
+
+LOGGING:
+  level: "INFO"
+  file: "logs/app.log"
+  LOG_REST_API: "false"
+  LOG_PROMPTS: "false"
+
+STORAGE:
+  LOGS_DIR: "logs"
+  SCREENSHOTS_DIR: "data/screenshots"
+  PDFS_DIR: "data/pdfs"
+  PROJECTS_DIR: "data/projects"
+  SQLITE_DB: "data/database.sqlite"
+
+TIMEOUT:
+  INFERENCE: 30 

@@ -1,129 +1,132 @@
-import time
 import json
 import os
-from src.services.terminal_runner import TerminalRunner
-from src.agents.patcher import Patcher
 from src.agents.base_agent import BaseAgent
-from src.llm import LLM
-from src.services.utils import retry_wrapper, validate_responses
-from agent.core.knowledge_base import KnowledgeBase
-<<<<<<< HEAD
-=======
-from src.llm import LLM
-from typing import List
->>>>>>> 925f80e (fifth commit)
+import sys
+import time
+from functools import wraps
+import logging
+from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
+
+def retry_wrapper(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        max_tries = 5
+        tries = 0
+        while tries < max_tries:
+            result = func(*args, **kwargs)
+            if result:
+                return result
+            logger.warning("Invalid response from the model, trying again...")
+            tries += 1
+            time.sleep(2)
+        logger.error("Maximum 5 attempts reached. Model keeps failing.")
+        sys.exit(1)
+    return wrapper
+
+class InvalidResponseError(Exception):
+    pass
+
+def validate_responses(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        args = list(args)
+        response = args[1]
+        response = response.strip()
+
+        try:
+            response = json.loads(response)
+            args[1] = response
+            return func(*args, **kwargs)
+
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            response = response.split("```")[1]
+            if response:
+                response = json.loads(response.strip())
+                args[1] = response
+                return func(*args, **kwargs)
+
+        except (IndexError, json.JSONDecodeError):
+            pass
+
+        try:
+            start_index = response.find('{')
+            end_index = response.rfind('}')
+            if start_index != -1 and end_index != -1:
+                json_str = response[start_index:end_index+1]
+                try:
+                    response = json.loads(json_str)
+                    args[1] = response
+                    return func(*args, **kwargs)
+
+                except json.JSONDecodeError:
+                    pass
+        except json.JSONDecodeError:
+            pass
+
+        for line in response.splitlines():
+            try:
+                response = json.loads(line)
+                args[1] = response
+                return func(*args, **kwargs)
+
+            except json.JSONDecodeError:
+                pass
+
+        raise InvalidResponseError("Failed to parse response as JSON")
+
+    return wrapper
 
 class Runner(BaseAgent):
     def __init__(self, base_model: str):
         super().__init__(base_model)
-        self.base_model = base_model
-        self.terminal_runner = TerminalRunner()
-        self.llm = LLM(model_id=base_model)
 
-<<<<<<< HEAD
-    def format_prompt(self, conversation: str, code_markdown: str, system_os: str, commands: list, error: str) -> str:
+    def format_prompt(self, code: str, context: str = "") -> str:
         """Format the runner prompt with the code and context."""
         prompt_template = self.get_prompt("runner")
         if not prompt_template:
             raise ValueError("Runner prompt not found in prompts.yaml")
-        return super().format_prompt(prompt_template, conversation=conversation, code_markdown=code_markdown, system_os=system_os, commands=commands, error=error)
-=======
-    def format_prompt(self, plan: str) -> str:
-        """Format the runner prompt with the plan."""
-        prompt_template = self.get_prompt("runner")
-        if not prompt_template:
-            raise ValueError("Runner prompt not found in prompts.yaml")
-        return super().format_prompt(prompt_template, plan=plan)
-
-    def format_rerunner_prompt(self, plan: str) -> str:
-        """Format the rerunner prompt with the plan."""
-        prompt_template = self.get_prompt("rerunner")
-        if not prompt_template:
-            raise ValueError("Rerunner prompt not found in prompts.yaml")
-        return super().format_prompt(prompt_template, plan=plan)
->>>>>>> 925f80e (fifth commit)
-
-    def render(
-        self,
-        conversation: str,
-        code_markdown: str,
-        system_os: str,
-        commands: list,
-        error: str
-    ) -> str:
-        return self.format_prompt(conversation, code_markdown, system_os, commands, error)
-
-    def render_rerunner(
-        self,
-        conversation: str,
-        code_markdown: str,
-        system_os: str,
-        commands: list,
-        error: str
-    ):
-        return self.format_prompt(conversation, code_markdown, system_os, commands, error)
+        return super().format_prompt(prompt_template, code=code, context=context)
 
     @validate_responses
     def validate_response(self, response: str):
         """Validate the response from the LLM."""
         try:
-            # The response should be a valid JSON string
             data = json.loads(response)
             if not isinstance(data, dict):
                 return False
-            if "output" not in data or not isinstance(data["output"], str):
+            if "commands" not in data or not isinstance(data["commands"], list):
                 return False
-            if "status" not in data or not isinstance(data["status"], str):
-                return False
+            for command in data["commands"]:
+                if not isinstance(command, str):
+                    return False
             return response
         except json.JSONDecodeError:
             return False
 
-    @validate_responses
-    def validate_rerunner_response(self, response: str):
-        if "action" not in response and "response" not in response:
-            return False
-        else:
-            return response
-
     @retry_wrapper
-    def run_code(self, commands: list, input_text: str = None) -> list:
-        results = []
-        for command in commands:
-            if isinstance(command, str):
-                command = command.split()
-            result = self.terminal_runner.run(command, input_text=input_text)
-            results.append(result)
-        return results
-
-    @retry_wrapper
-    def execute(self, conversation: str, code_markdown: str, system_os: str, commands: list, error: str, project_name: str = "") -> str:
+    async def execute(self, code: str, context: str = "", project_name: str = "") -> str:
         """Execute the runner agent."""
-        formatted_prompt = self.format_prompt(conversation, code_markdown, system_os, commands, error)
-        response = self.llm.inference(formatted_prompt, project_name)
-        validated = self.validate_response(response)
-        # Store in knowledge base if valid
-        if validated:
-            kb = KnowledgeBase()
-            kb.add_document(
-                text=validated,
-                metadata={"agent": "runner", "project_name": project_name, "conversation": conversation, "code_markdown": code_markdown, "system_os": system_os, "commands": commands, "error": error}
-            )
-        return validated
+        formatted_prompt = self.format_prompt(code, context)
+        response = await self.llm.chat_completion([{"role": "user", "content": formatted_prompt}], self.base_model)
+        validated_response = self.validate_response(response.choices[0].message.content)
+        return self.parse_response(validated_response)
 
     def parse_response(self, response: str) -> dict:
         """Parse the runner's response into a structured format."""
         try:
             data = json.loads(response)
             return {
-                "output": data.get("output", ""),
-                "status": data.get("status", ""),
+                "commands": data.get("commands", []),
                 "metadata": data.get("metadata", {})
             }
         except Exception as e:
             self.logger.error(f"Error parsing runner response: {str(e)}")
             return {
-                "output": "",
-                "status": "error",
+                "commands": [],
                 "metadata": {}
             }

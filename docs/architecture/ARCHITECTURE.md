@@ -17,12 +17,6 @@
                ▲               │ Socket.IO / HTTP
                │               ▼
 ┌─────────────────────────────────────────┐
-│            Flask-SocketIO API           │
-│  main.py – routes, Prometheus metrics   │
-└─────────────────────────────────────────┘
-               │ asyncio tasks / Swarm events
-               ▼
-┌─────────────────────────────────────────┐
 │             **Agent Core**              │
 │   – Planner ─ Researcher ─ Formatter    │
 │   – Answer  ─ Coder      ─ Runner       │
