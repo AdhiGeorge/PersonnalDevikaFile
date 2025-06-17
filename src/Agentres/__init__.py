@@ -1,7 +1,12 @@
+"""
+Agentres - A multi-agent system for task execution
+"""
+
+__version__ = "0.1.0"
+
 import os
 from Agentres.config import Config
 from Agentres.logger import Logger
-from Agentres.bert.sentence import SentenceBert
 
 
 def init_agent():
@@ -25,7 +30,9 @@ def init_agent():
     os.makedirs(projects_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
 
+    from Agentres.bert.sentence import SentenceBert
+
     logger.info("Loading sentence-transformer BERT models...")
     prompt = "Light-weight keyword extraction exercise for BERT model loading.".strip()
     SentenceBert(prompt).extract_keywords()
-    logger.info("BERT model loaded successfully.") 
+    logger.info("BERT model loaded successfully.")

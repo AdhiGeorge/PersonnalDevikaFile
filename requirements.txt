@@ -1,5 +1,5 @@
 # Core dependencies
-python-dotenv
+python-dotenv>=1.0.0
 requests
 aiohttp
 beautifulsoup4
@@ -66,3 +66,9 @@ pytest-repeat
 pytest-rerunfailures
 pytest-selenium
 pytest-playwright
+
+# Database dependencies
+qdrant-client>=1.6.0
+numpy>=1.24.0
+sqlite3
+openai>=1.0.0

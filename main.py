@@ -1,22 +1,15 @@
 import asyncio
-import logging
 import sys
+from datetime import datetime
 from typing import Dict, Any, Optional
-from src.config import Config
-from src.llm.llm import LLM
-from src.agents.agent import Agent
-from src.utils.token_tracker import TokenTracker
+from Agentres.config import Config
+from Agentres.llm.llm import LLM
+from Agentres.agents.agent import Agent
+from Agentres.utils.token_tracker import TokenTracker
+from Agentres.logger import Logger
 
-# Configure logging with more detailed format
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('agent.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# Initialize our custom logger
+logger = Logger()
 
 class AgentError(Exception):
     """Custom exception for agent-related errors."""
@@ -94,6 +87,7 @@ def format_result(result: Dict[str, Any]) -> str:
 
 async def main():
     """Main function to run the agent with enhanced error handling and logging."""
+    start_time = datetime.now()
     try:
         # Initialize components
         config, token_tracker, llm, agent = await initialize_components()
@@ -108,9 +102,20 @@ async def main():
                 continue
 
             try:
+                # Set the query in the logger
+                logger.set_query(prompt)
+                
                 # Execute agent
                 logger.info(f"Processing query: {prompt}")
                 result = await agent.execute(prompt)
+
+                # Log the results
+                if 'answer' in result:
+                    logger.set_planner_output(str(result['answer']))
+                if 'code' in result:
+                    logger.set_generated_code(str(result['code']))
+                if 'metadata' in result:
+                    logger.set_researcher_output(str(result['metadata']))
 
                 # Format and display results
                 print(format_result(result))
@@ -128,6 +133,8 @@ async def main():
         logger.error(f"Unexpected error: {str(e)}")
         print("\nAn unexpected error occurred. Please check the logs for more details.")
     finally:
+        end_time = datetime.now()
+        logger.set_execution_time(start_time, end_time)
         logger.info("Session ended")
 
 if __name__ == "__main__":
