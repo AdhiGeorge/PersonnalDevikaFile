@@ -1,17 +1,16 @@
 import os
-from Agentres.config import Config
-from Agentres.logger import Logger
+from Agentres.config.config import Config
+from Agentres.utils.logger import Logger
 from Agentres.bert.sentence import SentenceBert
 
 
 def init_agent():
-    logger = Logger()
+    config = Config()
+    logger = Logger(config=config)
 
     logger.info("Initializing Agent...")
     logger.info("checking configurations...")
     
-    config = Config()
-
     sqlite_db = config.get_sqlite_db()
     screenshots_dir = config.get_screenshots_dir()
     pdfs_dir = config.get_pdfs_dir()

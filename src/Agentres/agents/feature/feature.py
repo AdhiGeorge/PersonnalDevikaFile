@@ -6,7 +6,7 @@ import sys
 from functools import wraps
 import logging
 
-from Agentres.config import Config
+from Agentres.config.config import Config
 from Agentres.llm import LLM
 from Agentres.state import AgentState
 from Agentres.agents.base_agent import BaseAgent

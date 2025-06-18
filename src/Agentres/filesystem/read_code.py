@@ -1,6 +1,6 @@
 import os
 
-from Agentres.config import Config
+from Agentres.config.config import Config
 
 """
 TODO: Replace this with `code2prompt` - https://github.com/mufeedvh/code2prompt

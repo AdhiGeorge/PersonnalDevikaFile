@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 from Agentres.agents.base_agent import BaseAgent
 from Agentres.llm.llm import LLM
 from Agentres.utils.retry import retry_wrapper
-from Agentres.config import Config
+from Agentres.config.config import Config
 import re
 
 logger = logging.getLogger(__name__)
@@ -310,3 +310,90 @@ Your response must be a valid JSON object with the following structure:
         except Exception as e:
             logger.error(f"Error in answer execute: {str(e)}")
             raise
+
+    async def generate_answer(self, query: str, research: str, code: str = None) -> str:
+        """Generate a comprehensive answer based on research and code.
+        
+        Args:
+            query: The original query
+            research: The formatted research findings
+            code: Optional formatted code
+            
+        Returns:
+            str: The final answer
+        """
+        try:
+            self.logger.info("Generating answer...")
+            
+            # Get the answer prompt
+            answer_prompt = self.prompt_manager.get_prompt('answer')
+            
+            # Format the prompt with query, research, and code
+            system_prompt = answer_prompt.format(
+                query=query,
+                research=research,
+                code=code if code else "No code provided"
+            )
+            
+            # Get answer from LLM
+            response = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Please provide a comprehensive answer to: {query}"}
+                ]
+            )
+            
+            if not response:
+                raise ValueError("Empty response from LLM")
+                
+            # Extract the answer
+            answer = response.choices[0].message.content.strip()
+            
+            # Format the answer with markdown
+            formatted_answer = self._format_markdown(answer)
+            
+            self.logger.info("Answer generated successfully")
+            
+            return formatted_answer
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error generating answer: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    def _format_markdown(self, text: str) -> str:
+        """Format text with markdown.
+        
+        Args:
+            text: The text to format
+            
+        Returns:
+            str: Formatted text
+        """
+        try:
+            # Add proper spacing around headers
+            text = re.sub(r'(?m)^(#+)(.*?)$', r'\n\1\2\n', text)
+            
+            # Add proper spacing around lists
+            text = re.sub(r'(?m)^([*+-]|\d+\.)(.*?)$', r'\n\1\2', text)
+            
+            # Add proper spacing around code blocks
+            text = re.sub(r'```(.*?)```', r'\n```\1```\n', text, flags=re.DOTALL)
+            
+            # Add proper spacing around inline code
+            text = re.sub(r'`(.*?)`', r' `\1` ', text)
+            
+            # Clean up extra newlines
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            
+            # Clean up extra spaces
+            text = re.sub(r' {2,}', ' ', text)
+            
+            return text.strip()
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error formatting markdown: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            return text

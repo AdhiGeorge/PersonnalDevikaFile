@@ -1,140 +1,179 @@
 import asyncio
+import logging
+import os
 import sys
-from datetime import datetime
-from typing import Dict, Any, Optional
-from Agentres.config import Config
-from Agentres.llm.llm import LLM
+from typing import Optional
+from Agentres.config.config import Config
 from Agentres.agents.agent import Agent
-from Agentres.utils.token_tracker import TokenTracker
-from Agentres.logger import Logger
 
-# Initialize our custom logger
-logger = Logger()
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s:%(levelname)s: %(name)s: %(message)s',
+    datefmt='%y.%m.%d %H:%M:%S'
+)
 
-class AgentError(Exception):
-    """Custom exception for agent-related errors."""
-    pass
+logger = logging.getLogger(__name__)
 
-async def initialize_components() -> tuple[Config, TokenTracker, LLM, Agent]:
-    """Initialize all required components with proper error handling."""
+def validate_input(input_str: str) -> Optional[str]:
+    """Validate user input."""
+    if not input_str or not isinstance(input_str, str):
+        return None
+        
+    input_str = input_str.strip()
+    if not input_str:
+        return None
+        
+    # Check for maximum length
+    if len(input_str) > 1000:
+        logger.warning("Input exceeds maximum length of 1000 characters")
+        return None
+        
+    # Check for potentially harmful content
+    harmful_patterns = [
+        "rm -rf",
+        "del /f /s /q",
+        "format",
+        "drop database",
+        "delete from",
+        "drop table"
+    ]
+    
+    input_lower = input_str.lower()
+    if any(pattern in input_lower for pattern in harmful_patterns):
+        logger.warning("Input contains potentially harmful content")
+        return None
+        
+    return input_str
+
+def display_files(result: dict) -> None:
+    """Display the generated files to the user."""
+    try:
+        if not result or not isinstance(result, dict):
+            return
+            
+        files = result.get("files", {})
+        if not files:
+            return
+            
+        print("\nGenerated Files:")
+        if files.get("response"):
+            response_path = os.path.abspath(files["response"])
+            if os.path.exists(response_path):
+                print(f"Response: {response_path}")
+                # Show file size
+                size = os.path.getsize(response_path)
+                print(f"Size: {size/1024:.1f} KB")
+                
+        if files.get("code"):
+            code_path = os.path.abspath(files["code"])
+            if os.path.exists(code_path):
+                print(f"Code: {code_path}")
+                # Show file size
+                size = os.path.getsize(code_path)
+                print(f"Size: {size/1024:.1f} KB")
+                
+    except Exception as e:
+        logger.error(f"Error displaying files: {str(e)}")
+
+async def handle_user_interaction(agent: Agent, result: dict) -> None:
+    """Handle user interaction after initial response."""
+    try:
+        while True:
+            print("\nWhat would you like to do?")
+            print("1. Run the code")
+            print("2. Modify the code")
+            print("3. Ask a follow-up question")
+            print("4. Exit")
+            
+            choice = input("\nEnter your choice (1-4): ").strip()
+            
+            if choice == "1":
+                if result.get("files", {}).get("code"):
+                    print("\nRunning code...")
+                    run_result = await agent.run_code(result["files"]["code"])
+                    print("\nOutput:")
+                    print(run_result["output"])
+                    if run_result["error"]:
+                        print("\nErrors:")
+                        print(run_result["error"])
+                else:
+                    print("\nNo code file available to run.")
+                    
+            elif choice == "2":
+                if result.get("files", {}).get("code"):
+                    print("\nPlease describe the modifications needed:")
+                    modification = input("> ").strip()
+                    if modification:
+                        # TODO: Implement code modification
+                        print("Code modification not implemented yet.")
+                    else:
+                        print("No modification specified.")
+                else:
+                    print("\nNo code file available to modify.")
+                    
+            elif choice == "3":
+                print("\nEnter your follow-up question:")
+                follow_up = input("> ").strip()
+                if follow_up.lower() == "quit":
+                    break
+                    
+                validated_input = validate_input(follow_up)
+                if validated_input:
+                    result = await agent.process_query(validated_input)
+                    display_files(result)
+                else:
+                    print("Invalid input. Please try again.")
+                    
+            elif choice == "4":
+                break
+                
+            else:
+                print("\nInvalid choice. Please try again.")
+                
+    except Exception as e:
+        logger.error(f"Error in user interaction: {str(e)}")
+        print(f"\nAn error occurred: {str(e)}")
+
+async def main():
     try:
         # Initialize configuration
         config = Config()
+        await config.initialize()
         logger.info("Configuration initialized")
-
-        # Initialize token tracker with config
-        token_tracker = TokenTracker(config)
-        logger.info("Token tracker initialized")
-
-        # Initialize LLM
-        llm = LLM(config)
-        logger.info(f"LLM initialized with model: {config.model}")
-
+        
         # Initialize agent
         agent = Agent(config)
-        logger.info("Agent initialized with all components")
-
-        return config, token_tracker, llm, agent
-    except Exception as e:
-        logger.error(f"Failed to initialize components: {str(e)}")
-        raise AgentError(f"Initialization failed: {str(e)}")
-
-def format_result(result: Dict[str, Any]) -> str:
-    """Format the result in a clear and structured way."""
-    output = []
-    
-    # Format answer
-    if 'answer' in result:
-        if isinstance(result['answer'], dict):
-            output.append("\nAnswer:")
-            if 'summary' in result['answer']:
-                output.append(f"\nSummary: {result['answer']['summary']}")
-            if 'key_points' in result['answer']:
-                output.append("\nKey Points:")
-                for point in result['answer']['key_points']:
-                    output.append(f"- {point}")
-            if 'implementation_details' in result['answer']:
-                output.append(f"\nImplementation Details: {result['answer']['implementation_details']}")
-        else:
-            output.append(f"\nAnswer: {result['answer']}")
-
-    # Format code
-    if 'code' in result:
-        if isinstance(result['code'], dict):
-            output.append("\nCode:")
-            if 'implementation' in result['code']:
-                output.append(f"\n{result['code']['implementation']}")
-            if 'dependencies' in result['code']:
-                output.append(f"\nDependencies: {', '.join(result['code']['dependencies'])}")
-            if 'setup_instructions' in result['code']:
-                output.append(f"\nSetup Instructions: {result['code']['setup_instructions']}")
-        else:
-            output.append(f"\nCode: {result['code']}")
-
-    # Format metadata
-    if 'metadata' in result:
-        output.append("\nMetadata:")
-        if 'sources' in result['metadata']:
-            output.append(f"\nSources: {', '.join(result['metadata']['sources'])}")
-        if 'confidence' in result['metadata']:
-            output.append(f"Confidence: {result['metadata']['confidence']}")
-        if 'explanation' in result['metadata']:
-            output.append(f"Explanation: {result['metadata']['explanation']}")
-        if 'coverage' in result['metadata']:
-            output.append(f"Coverage: {result['metadata']['coverage']}")
-
-    return "\n".join(output)
-
-async def main():
-    """Main function to run the agent with enhanced error handling and logging."""
-    start_time = datetime.now()
-    try:
-        # Initialize components
-        config, token_tracker, llm, agent = await initialize_components()
-
-        # Get user input with validation
+        try:
+            await agent.initialize()
+            logger.info("Agent initialized with all components")
+        except Exception as e:
+            error_msg = f"Failed to initialize agent: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Main interaction loop
         while True:
-            prompt = input("\nEnter your query (or 'quit' to exit): ").strip()
-            if prompt.lower() == 'quit':
+            query = input("\nEnter your query (or 'quit' to exit): ")
+            if query.lower() == 'quit':
+                logger.info("Session ended")
                 break
-            if not prompt:
-                print("Please enter a valid query.")
-                continue
-
-            try:
-                # Set the query in the logger
-                logger.set_query(prompt)
                 
-                # Execute agent
-                logger.info(f"Processing query: {prompt}")
-                result = await agent.execute(prompt)
-
-                # Log the results
-                if 'answer' in result:
-                    logger.set_planner_output(str(result['answer']))
-                if 'code' in result:
-                    logger.set_generated_code(str(result['code']))
-                if 'metadata' in result:
-                    logger.set_researcher_output(str(result['metadata']))
-
-                # Format and display results
-                print(format_result(result))
-
+            logger.info(f"Processing query: {query}")
+            try:
+                response = await agent.process_query(query)
+                print("\n" + response)
             except Exception as e:
-                logger.error(f"Error processing query: {str(e)}")
-                print(f"\nAn error occurred while processing your query: {str(e)}")
+                error_msg = str(e)
+                logger.error(f"Error processing query: {error_msg}")
+                print(f"\nAn error occurred while processing your query: {error_msg}")
                 print("Please try again with a different query or contact support if the issue persists.")
-
-    except AgentError as e:
-        logger.error(f"Agent error: {str(e)}")
-        print(f"\nA system error occurred: {str(e)}")
-        print("Please check the logs for more details and contact support if needed.")
+                
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        print("\nAn unexpected error occurred. Please check the logs for more details.")
-    finally:
-        end_time = datetime.now()
-        logger.set_execution_time(start_time, end_time)
+        error_msg = str(e)
+        logger.error(f"Agent error: {error_msg}")
+        print(f"\nA system error occurred: {error_msg}")
+        print("Please check the logs for more details and contact support if needed.")
         logger.info("Session ended")
 
 if __name__ == "__main__":

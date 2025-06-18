@@ -3,8 +3,9 @@ import sys
 import time
 from functools import wraps
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 from Agentres.agents.base_agent import BaseAgent
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -126,3 +127,142 @@ class Formatter(BaseAgent):
                 "formatted_code": "",
                 "metadata": {}
             }
+
+    async def format_research(self, research_results: List[Dict[str, Any]]) -> str:
+        """Format research results into a structured response.
+        
+        Args:
+            research_results: List of research results
+            
+        Returns:
+            str: Formatted research response
+        """
+        try:
+            self.logger.info("Formatting research results...")
+            
+            # Get the research synthesis prompt
+            research_synthesis_prompt = self.prompt_manager.get_prompt('research_synthesis')
+            
+            # Format the prompt with research results
+            system_prompt = research_synthesis_prompt.format(
+                research_findings=json.dumps(research_results, indent=2)
+            )
+            
+            # Get synthesis from LLM
+            response = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Please synthesize these research findings."}
+                ]
+            )
+            
+            if not response:
+                raise ValueError("Empty response from LLM")
+                
+            # Extract the synthesis
+            synthesis = response.choices[0].message.content.strip()
+            
+            # Format the synthesis with markdown
+            formatted_synthesis = self._format_markdown(synthesis)
+            
+            self.logger.info("Research results formatted successfully")
+            
+            return formatted_synthesis
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error formatting research: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    async def format_code(self, code: str, requirements: str) -> str:
+        """Format code with documentation and examples.
+        
+        Args:
+            code: The code to format
+            requirements: The original requirements
+            
+        Returns:
+            str: Formatted code
+        """
+        try:
+            self.logger.info("Formatting code...")
+            
+            # Get the code review prompt
+            code_review_prompt = self.prompt_manager.get_prompt('code_review')
+            
+            # Format the prompt with code and requirements
+            system_prompt = code_review_prompt.format(
+                code=code,
+                requirements=requirements
+            )
+            
+            # Get review from LLM
+            response = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Please review and improve this code."}
+                ]
+            )
+            
+            if not response:
+                raise ValueError("Empty response from LLM")
+                
+            # Extract the improved code
+            improved_code = response.choices[0].message.content.strip()
+            
+            # Clean up the response
+            if '```' in improved_code:
+                # Extract code from markdown code blocks
+                code_blocks = re.findall(r'```(?:[a-z]*\n)?(.*?)```', improved_code, re.DOTALL)
+                if code_blocks:
+                    improved_code = code_blocks[0].strip()
+            
+            # Format the code with markdown
+            formatted_code = self._format_markdown(improved_code)
+            
+            self.logger.info("Code formatted successfully")
+            
+            return formatted_code
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error formatting code: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    def _format_markdown(self, text: str) -> str:
+        """Format text with markdown.
+        
+        Args:
+            text: The text to format
+            
+        Returns:
+            str: Formatted text
+        """
+        try:
+            # Add proper spacing around headers
+            text = re.sub(r'(?m)^(#+)(.*?)$', r'\n\1\2\n', text)
+            
+            # Add proper spacing around lists
+            text = re.sub(r'(?m)^([*+-]|\d+\.)(.*?)$', r'\n\1\2', text)
+            
+            # Add proper spacing around code blocks
+            text = re.sub(r'```(.*?)```', r'\n```\1```\n', text, flags=re.DOTALL)
+            
+            # Add proper spacing around inline code
+            text = re.sub(r'`(.*?)`', r' `\1` ', text)
+            
+            # Clean up extra newlines
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            
+            # Clean up extra spaces
+            text = re.sub(r' {2,}', ' ', text)
+            
+            return text.strip()
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error formatting markdown: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            return text

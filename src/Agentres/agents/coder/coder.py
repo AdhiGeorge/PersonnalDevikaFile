@@ -6,15 +6,17 @@ import sys
 from functools import wraps
 import logging
 import asyncio
+import tempfile
+import re
 
 from Agentres.agents.base_agent import BaseAgent
-from Agentres.llm import LLM
-from Agentres.config import Config
+from Agentres.llm.llm import LLM
+from Agentres.config.config import Config
 from Agentres.project import ProjectManager
 from Agentres.state import AgentState
 from Agentres.prompts.prompt_manager import PromptManager
 from Agentres.services.terminal_runner import TerminalRunner
-from Agentres.logger import Logger
+from Agentres.utils.logger import Logger
 from Agentres.knowledge_base.knowledge_base import KnowledgeBase
 
 logger = logging.getLogger(__name__)
@@ -92,61 +94,257 @@ def validate_responses(func):
     return wrapper
 
 class Coder(BaseAgent):
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.llm = LLM(config)
-        self.logger = Logger()
-        self.config = config
-        self.project_manager = ProjectManager()
-        self.state = AgentState()
-        self.prompt_manager = PromptManager()
-        self.terminal_runner = TerminalRunner()
-        self.knowledge_base = KnowledgeBase()
-
-    def implement(self, query: str, plan: str, research: str) -> str:
-        """Implement the given query based on plan and research"""
-        self.logger.info(f"Starting implementation phase for query: {query}")
+    """Coder agent for generating and modifying code."""
+    
+    def __init__(self, config: Config, model: str = "gpt-4o"):
+        """Initialize the coder agent with configuration.
         
-        # Generate code
-        prompt = self.prompt_manager.get_prompt("coder", query, plan, research)
-        code = self.llm.generate(prompt)
-        
-        # Log the generated code
-        self.logger.set_coder_output(code)
-        self.logger.set_generated_code(
-            code=code,
-            language=self._detect_language(code),
-            file_path=self._determine_file_path(query)
-        )
-        
-        # Execute the code
+        Args:
+            config: Configuration object
+            model: The LLM model to use for code generation
+        """
         try:
-            results = self.terminal_runner.run_code(code)
-            self.logger.set_execution_results({
-                'success': True,
-                'output': results.output,
-                'error': results.error,
-                'exit_code': results.exit_code
-            })
+            # Initialize base agent first
+            super().__init__(config, model)
+            
+            # Initialize components that don't require async
+            self._initialized = False
+            self._coder_prompt_manager = None
+            
+            # Code generation state
+            self.current_file = None
+            self.current_context = {}
+            self.code_cache = {}
+            
+            # Configuration with defaults
+            self.max_retries = 3
+            self.max_tokens = 4000
+            
+            # Set default prompts
+            self.code_generation_prompt = None
+            self.code_review_prompt = None
+            
+            logging.info("Coder initialized")
+            
         except Exception as e:
-            self.logger.error(f"Error executing code: {str(e)}")
-            self.logger.set_execution_results({
-                'success': False,
-                'error': str(e)
-            })
+            error_msg = f"Failed to initialize coder: {str(e)}"
+            logging.error(error_msg, exc_info=True)
+            raise ValueError(error_msg)
+
+    async def initialize(self):
+        """Initialize async components and validate configuration."""
+        try:
+            # Skip if already initialized
+            if self._initialized:
+                return True
+                
+            # Initialize base agent async components first
+            await super().initialize()
+            
+            # Ensure base components are initialized
+            if not hasattr(self, 'logger') or not hasattr(self, 'llm') or not hasattr(self, 'prompt_manager'):
+                raise RuntimeError("Base agent components not properly initialized")
+            
+            # Initialize prompt manager
+            try:
+                # Use the base agent's prompt manager
+                self._coder_prompt_manager = self.prompt_manager
+                
+                # Load required prompts with error handling
+                try:
+                    self.code_generation_prompt = self._coder_prompt_manager.get_prompt("code_generation")
+                    self.code_review_prompt = self._coder_prompt_manager.get_prompt("code_review")
+                except Exception as e:
+                    self.logger.warning(f"Failed to load some prompts: {str(e)}")
+                
+                # Set default prompts if not found
+                if not self.code_generation_prompt:
+                    self.code_generation_prompt = """Generate code based on the following requirements:
+                    {requirements}
+                    
+                    Instructions:
+                    1. Write clean, efficient, and well-documented code
+                    2. Include necessary imports and setup
+                    3. Add error handling where appropriate
+                    4. Follow best practices for the language"""
+                    
+                if not self.code_review_prompt:
+                    self.code_review_prompt = """Review the following code for quality, efficiency, and correctness:
+                    
+                    {code}
+                    
+                    Provide feedback on:
+                    1. Code quality and readability
+                    2. Potential bugs or edge cases
+                    3. Performance optimizations
+                    4. Security considerations"""
+                
+                self.logger.info("Coder components initialized successfully")
+                self._initialized = True
+                return True
+                
+            except Exception as e:
+                error_msg = f"Failed to initialize coder prompts: {str(e)}"
+                self.logger.error(error_msg, exc_info=True)
+                raise RuntimeError(error_msg)
+                
+        except Exception as e:
+            error_msg = f"Failed to initialize coder: {str(e)}"
+            if hasattr(self, 'logger'):
+                self.logger.error(error_msg, exc_info=True)
+            else:
+                logging.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg)
+
+    async def implement(self, query: str, plan: str, research: str) -> str:
+        """Implement code based on query, plan and research.
         
-        self.logger.info("Implementation phase completed")
-        return code
+        Args:
+            query: The original query
+            plan: The implementation plan
+            research: Research findings
+            
+        Returns:
+            str: Generated code
+        """
+        try:
+            # Ensure initialized
+            if not self._initialized:
+                await self.initialize()
+                
+            self.logger.info("Starting code generation...")
+            
+            # Store current requirements
+            self.current_requirements = query
+            
+            # Get the code generation prompt
+            code_generation_prompt = self.prompt_manager.get_prompt('code_generation')
+            
+            # Format the prompt with requirements, context, and plan
+            system_prompt = code_generation_prompt.format(
+                requirements=query,
+                context=research,
+                plan=plan
+            )
+            
+            # Generate code using LLM
+            self.logger.debug(f"Sending request to LLM with prompt: {system_prompt[:200]}...")
+            response = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Please generate code for: {query}"}
+                ]
+            )
+            
+            if not response:
+                raise ValueError("Empty response from LLM")
+                
+            # Extract the generated code
+            generated_code = response.choices[0].message.content.strip()
+            
+            # Clean up the response
+            if '```' in generated_code:
+                # Extract code from markdown code blocks
+                import re
+                code_blocks = re.findall(r'```(?:[a-z]*\n)?(.*?)```', generated_code, re.DOTALL)
+                if code_blocks:
+                    generated_code = code_blocks[0].strip()
+            
+            self.logger.info("Code generation completed")
+            
+            # Review and improve code
+            improved_code = await self._review_code(generated_code)
+            
+            return improved_code
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in code generation: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    async def _review_code(self, code: str) -> str:
+        """Review and improve generated code.
+        
+        Args:
+            code: The code to review
+            
+        Returns:
+            str: Improved code
+        """
+        try:
+            self.logger.info("Starting code review...")
+            
+            # Get the code review prompt
+            code_review_prompt = self.prompt_manager.get_prompt('code_review')
+            
+            # Format the prompt with the code and requirements
+            system_prompt = code_review_prompt.format(
+                code=code,
+                requirements=self.current_requirements
+            )
+            
+            # Get review from LLM
+            response = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Please review and improve this code."}
+                ]
+            )
+            
+            if not response:
+                raise ValueError("Empty response from LLM")
+                
+            # Extract the improved code
+            improved_code = response.choices[0].message.content.strip()
+            
+            # Clean up the response
+            if '```' in improved_code:
+                # Extract code from markdown code blocks
+                import re
+                code_blocks = re.findall(r'```(?:[a-z]*\n)?(.*?)```', improved_code, re.DOTALL)
+                if code_blocks:
+                    improved_code = code_blocks[0].strip()
+            
+            self.logger.info("Code review completed")
+            
+            return improved_code
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in code review: {str(e)}\n{traceback.format_exc()}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
 
     def _detect_language(self, code: str) -> str:
-        """Detect the programming language of the code"""
-        # Simple language detection logic
-        if code.startswith('def ') or code.startswith('class '):
+        """Detect the programming language of the code."""
+        try:
+            # Check for language-specific patterns
+            if re.search(r'^(def|class|import|from|if __name__ == "__main__")', code, re.MULTILINE):
+                return 'python'
+            elif re.search(r'^(function|const|let|var|class|import|export)', code, re.MULTILINE):
+                return 'javascript'
+            elif re.search(r'^(<!DOCTYPE|<!doctype|<html|<head|<body)', code, re.MULTILINE):
+                return 'html'
+            elif re.search(r'^(package|import|class|public|private|protected)', code, re.MULTILINE):
+                return 'java'
+            elif re.search(r'^(#include|int main|void main|class|namespace)', code, re.MULTILINE):
+                return 'cpp'
+            elif re.search(r'^(package|import|func|type|interface)', code, re.MULTILINE):
+                return 'go'
+            elif re.search(r'^(fn|struct|impl|trait|use|mod)', code, re.MULTILINE):
+                return 'rust'
+            elif re.search(r'^(<?php|function|class|namespace)', code, re.MULTILINE):
+                return 'php'
+            elif re.search(r'^(import|class|interface|type|enum)', code, re.MULTILINE):
+                return 'typescript'
+            
+            # Default to Python if no specific patterns found
             return 'python'
-        elif code.startswith('function ') or code.startswith('const '):
-            return 'javascript'
-        # Add more language detection logic as needed
-        return 'unknown'
+            
+        except Exception as e:
+            logger.error(f"Error detecting language: {str(e)}")
+            return 'python'  # Default to Python on error
 
     def _determine_file_path(self, query: str) -> str:
         """Determine the appropriate file path for the code"""
@@ -229,25 +427,24 @@ class Coder(BaseAgent):
         # Removed emit_agent call as it is frontend related
 
     @retry_wrapper
-    async def execute(self, task: str, context: str = "", project_name: str = "") -> str:
-        self.state.set_agent_state(project_name, self.__class__.__name__)
-
-        prompt_name = "coder"
-        prompt = self.prompt_manager.get_prompt(prompt_name)
-        if not prompt:
-            raise ValueError(f"Prompt '{prompt_name}' not found.")
-
-        prompt_args = {
-            "task": task,
-            "context": context
-        }
-        formatted_prompt = self.format_prompt(prompt, **prompt_args)
-
-        self.logger.info(f"Coder Agent - Sending prompt to LLM: {formatted_prompt[:200]}...")
-        response = await self.llm.chat_completion([{"role": "user", "content": formatted_prompt}], self.base_model)
-        self.logger.info(f"Coder Agent - Received response from LLM: {response}")
-
-        return response.choices[0].message.content
+    async def execute(self, query: str, plan: str, research: str) -> str:
+        """Execute the coder agent"""
+        self.logger.info(f"Executing coder agent for query: {query}")
+        
+        # Generate code
+        code = await self.implement(query, plan, research)
+        
+        # Validate the response
+        if not await self.validate_response(code):
+            raise ValueError("Invalid response from LLM")
+        
+        # Run the code
+        results = await self.run_code(code)
+        
+        # Log the results
+        self.logger.set_execution_results(results)
+        
+        return code
 
     def parse_response(self, response: str) -> dict:
         """Parse the coder's response into a structured format."""
@@ -265,3 +462,82 @@ class Coder(BaseAgent):
                 "explanation": "I apologize, but I encountered an error while generating the code.",
                 "metadata": {}
             }
+
+    async def run_code(self, code: str) -> dict:
+        """Run the generated code and return results."""
+        try:
+            if not code:
+                raise ValueError("No code to run")
+                
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix=self._get_file_extension(code), delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                # Run the code
+                results = await self.terminal_runner.run_code(temp_file)
+                
+                # Log execution results
+                self.logger.set_execution_results({
+                    'success': True,
+                    'output': results.output,
+                    'error': results.error,
+                    'exit_code': results.exit_code
+                })
+                
+                return {
+                    'success': True,
+                    'output': results.output,
+                    'error': results.error,
+                    'exit_code': results.exit_code
+                }
+                
+            except Exception as e:
+                error_msg = str(e)
+                self.logger.error(f"Error running code: {error_msg}")
+                self.logger.set_execution_results({
+                    'success': False,
+                    'error': error_msg
+                })
+                
+                return {
+                    'success': False,
+                    'error': error_msg
+                }
+                
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_file)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temporary file: {str(e)}")
+                    
+        except Exception as e:
+            error_msg = f"Failed to run code: {str(e)}"
+            self.logger.error(error_msg)
+            return {
+                'success': False,
+                'error': error_msg
+            }
+
+    def _get_file_extension(self, code: str) -> str:
+        """Get the appropriate file extension for the code."""
+        language = self._detect_language(code)
+        extensions = {
+            'python': '.py',
+            'javascript': '.js',
+            'html': '.html',
+            'css': '.css',
+            'java': '.java',
+            'c': '.c',
+            'cpp': '.cpp',
+            'go': '.go',
+            'rust': '.rs',
+            'ruby': '.rb',
+            'php': '.php',
+            'swift': '.swift',
+            'kotlin': '.kt',
+            'typescript': '.ts'
+        }
+        return extensions.get(language, '.txt')

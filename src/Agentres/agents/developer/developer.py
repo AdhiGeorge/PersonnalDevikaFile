@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Dict, Any, List, Optional
 from Agentres.agents.base_agent import BaseAgent
-from Agentres.config import Config
+from Agentres.config.config import Config
 from Agentres.llm.llm import LLM
 
 logger = logging.getLogger(__name__)

@@ -5,18 +5,17 @@ Agentres - A multi-agent system for task execution
 __version__ = "0.1.0"
 
 import os
-from Agentres.config import Config
-from Agentres.logger import Logger
+from Agentres.config.config import Config
+from Agentres.utils.logger import Logger
 
 
 def init_agent():
-    logger = Logger()
+    config = Config()
+    logger = Logger(config=config)
 
     logger.info("Initializing Agent...")
     logger.info("checking configurations...")
     
-    config = Config()
-
     sqlite_db = config.get_sqlite_db()
     screenshots_dir = config.get_screenshots_dir()
     pdfs_dir = config.get_pdfs_dir()

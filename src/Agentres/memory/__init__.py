@@ -1,1 +1,1 @@
-from .knowledge_base import KnowledgeBase
+from Agentres.knowledge_base.knowledge_base import KnowledgeBase

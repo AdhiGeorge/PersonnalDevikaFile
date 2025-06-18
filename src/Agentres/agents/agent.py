@@ -1,117 +1,439 @@
-from .planner import Planner
-from .researcher import Researcher
-from .formatter import Formatter
-from .coder import Coder
-from .answer import Answer
-from .runner import Runner
-from .feature import Feature
-from .patcher import Patcher
-from .reporter import Reporter
-from .developer import Developer
-from .action import Action
+"""Main agent class that coordinates all sub-agents."""
 
+import logging
+from typing import Dict, Any, List, Optional
+
+from Agentres.agents.base_agent import BaseAgent
+from Agentres.config.config import Config
 from Agentres.project import ProjectManager
-from Agentres.state import AgentState
-from Agentres.logger import Logger
-
+from Agentres.memory.memory import Memory
+from Agentres.agents.orchestrator import AgentContext
+from Agentres.utils.metrics import AgentMetrics
+from Agentres.utils.error_handler import ErrorHandler
+from Agentres.utils.rate_limiter import RateLimiter
+from Agentres.utils.cache import Cache
 from Agentres.bert.sentence import SentenceBert
-from Agentres.agents.researcher.knowledge_base import KnowledgeBase
+from Agentres.knowledge_base.knowledge_base import KnowledgeBase
 from Agentres.browser.search import SearchEngine
 from Agentres.browser import Browser
 from Agentres.browser import start_interaction
 from Agentres.filesystem import ReadCode
+from Agentres.services.terminal_runner import TerminalRunner
 
 import json
 import time
 import platform
 import tiktoken
 import asyncio
-import logging
 import re
-from Agentres.services.terminal_runner import TerminalRunner
-from prometheus_client import Counter, Histogram, start_http_server
+import os
+
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from Agentres.llm.llm import LLM
-from Agentres.utils.token_tracker import TokenTracker
-from Agentres.config import Config
-from Agentres.agents.base_agent import BaseAgent
-
-from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
-# Prometheus metrics
-LLM_CALLS = Counter('llm_calls_total', 'Total number of LLM calls', ['model'])
-SEARCH_CALLS = Counter('search_calls_total', 'Total number of search calls', ['engine'])
-LLM_LATENCY = Histogram('llm_latency_seconds', 'LLM call latency in seconds', ['model'])
-SEARCH_LATENCY = Histogram('search_latency_seconds', 'Search call latency in seconds', ['engine'])
-
 class Agent(BaseAgent):
     """Main agent class that coordinates all sub-agents."""
     
-    def __init__(self, config: Config):
-        """Initialize the agent with configuration."""
-        super().__init__(config)
+    def __init__(self, config: Config, model: str = "gpt-4"):
+        """Initialize the agent with all components.
         
-        self.config = config
-        self.logger = Logger()
-        
-        # Initialize sub-agents
-        self.planner = Planner(config)
-        self.researcher = Researcher(config)
-        self.coder = Coder(config)
-        self.patcher = Patcher(config)
-        self.action = Action(config)
-        
-        # Initialize knowledge base
-        self.knowledge_base = KnowledgeBase()
-        
-        # Initialize project manager
-        self.project_manager = ProjectManager()
-        
-        logger.info("Agent initialized with all components")
-
-    async def execute(self, query: str) -> Dict[str, Any]:
-        """Execute the agent's workflow."""
+        Args:
+            config: Configuration instance
+            model: Model name to use
+        """
         try:
-            # Plan
-            self.logger.info("Starting planning phase...")
+            # Initialize base agent first
+            super().__init__(config, model)
+            
+            # Initialize components lazily
+            self._planner = None
+            self._researcher = None
+            self._coder = None
+            self._project_manager = None
+            self._knowledge_base = None
+            self._search_engine = None
+            
+            logging.info("Agent initialized with all components")
+        except Exception as e:
+            error_msg = f"Failed to initialize components: {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+
+    async def initialize(self) -> bool:
+        """Initialize the agent and its components.
+        
+        Returns:
+            bool: True if initialization was successful
+        """
+        try:
+            # Initialize base components
+            await super().initialize()
+            
+            # Initialize components lazily
+            self._initialized = True
+            return True
+            
+        except Exception as e:
+            self._initialized = False
+            raise ValueError(f"Async initialization failed: {str(e)}")
+            
+    @property
+    def planner(self):
+        """Get the planner component."""
+        if not self._planner:
+            from .planner import Planner
+            self._planner = Planner(config=self.config, model=self.model)
+            # Initialize planner
+            asyncio.create_task(self._planner.initialize())
+        return self._planner
+        
+    @property
+    def researcher(self):
+        """Get the researcher component."""
+        if not self._researcher:
+            from .researcher import Researcher
+            self._researcher = Researcher(config=self.config, model=self.model)
+            # Initialize researcher
+            asyncio.create_task(self._researcher.initialize())
+        return self._researcher
+        
+    @property
+    def coder(self):
+        """Get the coder component."""
+        if not self._coder:
+            from .coder import Coder
+            self._coder = Coder(config=self.config, model=self.model)
+            # Initialize coder
+            asyncio.create_task(self._coder.initialize())
+        return self._coder
+        
+    @property
+    def project_manager(self):
+        """Get the project manager component."""
+        if not self._project_manager:
+            self._project_manager = ProjectManager()
+        return self._project_manager
+        
+    @property
+    def knowledge_base(self):
+        """Get the knowledge base component."""
+        if not self._knowledge_base:
+            self._knowledge_base = KnowledgeBase()
+        return self._knowledge_base
+        
+    @property
+    def search_engine(self):
+        """Get the search engine component."""
+        if not self._search_engine:
+            self._search_engine = SearchEngine()
+        return self._search_engine
+
+    async def process_query(self, query: str) -> Dict[str, Any]:
+        """Process a user query through the agent system."""
+        try:
+            if not self._initialized:
+                raise RuntimeError("Agent not initialized. Call initialize() first.")
+                
+            logging.info("Starting planning phase...")
             plan = await self.planner.plan(query)
-            self.logger.set_planner_output(str(plan))
             
-            # Research
-            self.logger.info("Starting research phase...")
-            research_data = await self.researcher.research(query, plan)
-            self.logger.set_researcher_output(str(research_data))
+            # Validate plan structure
+            if not isinstance(plan, dict):
+                raise ValueError("Plan must be a dictionary")
+                
+            steps = plan.get("steps", [])
+            if not isinstance(steps, list):
+                raise ValueError("Plan must contain a 'steps' array")
+                
+            final_answer = plan.get("final_answer", {})
+            if not isinstance(final_answer, dict):
+                raise ValueError("Plan must contain a 'final_answer' object")
+                
+            # Process each step
+            research_results = {}
+            code_results = {}
             
-            # Code
-            self.logger.info("Starting coding phase...")
-            code = await self.coder.code(query, plan, research_data)
-            self.logger.set_generated_code(str(code))
-            
-            # Patch
-            self.logger.info("Starting patching phase...")
-            patched_code = await self.patcher.patch(code)
-            self.logger.set_generated_code(str(patched_code), language="python")
-            
-            # Execute
-            self.logger.info("Starting execution phase...")
-            result = await self.action.execute(patched_code)
-            self.logger.set_execution_results(result)
+            for step in steps:
+                if not isinstance(step, dict):
+                    raise ValueError(f"Invalid step structure: {step}")
+                    
+                step_id = step.get("id")
+                agent_type = step.get("agent")
+                
+                if not step_id or not agent_type:
+                    raise ValueError(f"Step must contain 'id' and 'agent' fields: {step}")
+                    
+                if agent_type not in ["researcher", "developer", "answer"]:
+                    raise ValueError(f"Invalid agent type: {agent_type}")
+                
+                if agent_type == "researcher":
+                    # Process research queries
+                    queries = step.get("queries", [])
+                    for query in queries:
+                        # Search knowledge base first
+                        kb_results = await self.researcher.search_knowledge_base(query)
+                        if not kb_results or len(kb_results) < 3:
+                            logging.info(f"Insufficient knowledge base results for: {query}")
+                            # Perform web search
+                            search_results = await self.researcher.search_web(query)
+                            if search_results:
+                                # Store results in knowledge base
+                                await self.researcher.store_research_results(search_results, query)
+                                research_results[query] = search_results
+                            else:
+                                research_results[query] = []
+                        else:
+                            research_results[query] = kb_results
+                            
+                    # Synthesize research results
+                    if research_results:
+                        synthesis = await self.researcher.synthesize_research(query, research_results)
+                        research_results["synthesis"] = synthesis
+                        
+                elif agent_type == "developer":
+                    # Generate code based on research
+                    if "synthesis" in research_results:
+                        code_result = await self.coder.implement(
+                            query=query,
+                            plan=plan,
+                            research=research_results["synthesis"]
+                        )
+                        code_results[step_id] = code_result
+                        
+            # Generate final answer
+            final_answer = await self.researcher.generate_final_answer(
+                query=query,
+                research=research_results.get("synthesis", ""),
+                code=code_results,
+                plan=plan
+            )
             
             return {
-                "answer": plan,
-                "code": patched_code,
-                "metadata": {
-                    "research_data": research_data,
-                    "execution_results": result
-                }
+                "query": query,
+                "plan": plan,
+                "research": research_results,
+                "code": code_results,
+                "final_answer": final_answer
+            }
+            
+        except Exception as e:
+            logging.error(f"Query processing failed: {str(e)}")
+            raise ValueError(f"Query processing failed: {str(e)}")
+
+    async def _save_code(self, code: str, filepath: str) -> None:
+        """Save generated code to a file."""
+        try:
+            if not code or not isinstance(code, str):
+                raise ValueError("Invalid code content")
+                
+            # Create directory if it doesn't exist
+            directory = os.path.dirname(filepath)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+                
+            # Validate file path
+            if not os.path.isabs(filepath):
+                filepath = os.path.abspath(filepath)
+                
+            # Check if file is writable
+            if os.path.exists(filepath) and not os.access(filepath, os.W_OK):
+                raise PermissionError(f"No write permission for file: {filepath}")
+                
+            # Write code to file
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(code)
+                
+            logger.info(f"Code saved to {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Error saving code: {str(e)}")
+            raise
+
+    async def _save_response(self, response: str, filepath: str) -> None:
+        """Save response to a text file."""
+        try:
+            if not response or not isinstance(response, str):
+                raise ValueError("Invalid response content")
+                
+            # Create directory if it doesn't exist
+            directory = os.path.dirname(filepath)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+                
+            # Validate file path
+            if not os.path.isabs(filepath):
+                filepath = os.path.abspath(filepath)
+                
+            # Check if file is writable
+            if os.path.exists(filepath) and not os.access(filepath, os.W_OK):
+                raise PermissionError(f"No write permission for file: {filepath}")
+                
+            # Write response to file
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(response)
+                
+            logger.info(f"Response saved to {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Error saving response: {str(e)}")
+            raise
+
+    def _determine_file_extension(self, code: str) -> str:
+        """Determine the appropriate file extension based on code content."""
+        try:
+            if not code or not isinstance(code, str):
+                raise ValueError("Invalid code content")
+                
+            # Simple heuristic to determine language
+            code_lower = code.lower()
+            
+            if "def " in code_lower or "import " in code_lower or "class " in code_lower:
+                return ".py"
+            elif "<html" in code_lower or "<!DOCTYPE" in code_lower:
+                return ".html"
+            elif "function" in code_lower or "const " in code_lower or "let " in code_lower:
+                return ".js"
+            elif "class" in code_lower and "{" in code_lower:
+                return ".java"
+            elif "package " in code_lower:
+                return ".go"
+            elif "fn " in code_lower:
+                return ".rs"
+            else:
+                return ".txt"  # Default to .txt if language can't be determined
+                
+        except Exception as e:
+            logger.error(f"Error determining file extension: {str(e)}")
+            return ".txt"  # Default to .txt on error
+
+    async def run_code(self, code_file: str) -> Dict[str, Any]:
+        """Run the generated code and return results."""
+        try:
+            if not os.path.exists(code_file):
+                raise FileNotFoundError(f"Code file not found: {code_file}")
+                
+            # Determine how to run the code based on file extension
+            extension = os.path.splitext(code_file)[1].lower()
+            
+            if extension == '.py':
+                result = await self._run_python_code(code_file)
+            elif extension == '.js':
+                result = await self._run_javascript_code(code_file)
+            else:
+                raise ValueError(f"Unsupported file extension: {extension}")
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error running code: {str(e)}")
+            raise
+
+    async def _run_python_code(self, filepath: str) -> Dict[str, Any]:
+        """Run Python code and return results."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                'python', filepath,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            return {
+                "success": process.returncode == 0,
+                "output": stdout.decode() if stdout else "",
+                "error": stderr.decode() if stderr else "",
+                "exit_code": process.returncode
+            }
+            
+        except Exception as e:
+            logger.error(f"Error running Python code: {str(e)}")
+            raise
+
+    async def _run_javascript_code(self, filepath: str) -> Dict[str, Any]:
+        """Run JavaScript code and return results."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                'node', filepath,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            return {
+                "success": process.returncode == 0,
+                "output": stdout.decode() if stdout else "",
+                "error": stderr.decode() if stderr else "",
+                "exit_code": process.returncode
+            }
+            
+        except Exception as e:
+            logger.error(f"Error running JavaScript code: {str(e)}")
+            raise
+
+    async def process_query_with_context(self, query: str, context: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Process a user query with context."""
+        try:
+            if not isinstance(query, str):
+                raise ValueError("query must be a string")
+            if not isinstance(context, list):
+                raise ValueError("context must be a list")
+
+            # Create task
+            task = {
+                "query": query,
+                "prompt": query,
+                "context": context
+            }
+            
+            # Plan the response with context
+            plan_result = await self.planner.execute_with_context(task, context)
+            plan = plan_result.get("response", "")
+            
+            # Research the query with context
+            research_result = await self.researcher.execute_with_context(task, context)
+            research = research_result.get("response", "")
+            
+            # Combine results
+            return {
+                "query": query,
+                "plan": plan,
+                "research": research,
+                "context": context
             }
         except Exception as e:
-            self.logger.error(f"Error in agent execution: {str(e)}")
-            raise
+            logger.error(f"Error processing query with context: {str(e)}")
+            raise ValueError(f"Query processing failed: {str(e)}")
+
+    async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a task."""
+        try:
+            if not isinstance(task, dict):
+                raise ValueError("task must be a dictionary")
+
+            query = str(task.get("query", ""))
+            return await self.process_query(query)
+        except Exception as e:
+            logger.error(f"Error executing task: {str(e)}")
+            raise ValueError(f"Task execution failed: {str(e)}")
+
+    async def execute_with_context(self, task: Dict[str, Any], context: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Execute a task with context."""
+        try:
+            if not isinstance(task, dict):
+                raise ValueError("task must be a dictionary")
+            if not isinstance(context, list):
+                raise ValueError("context must be a list")
+
+            query = str(task.get("query", ""))
+            return await self.process_query_with_context(query, context)
+        except Exception as e:
+            logger.error(f"Error executing task with context: {str(e)}")
+            raise ValueError(f"Task execution with context failed: {str(e)}")
 
     async def handle_feedback(self, feedback: str, project_name: str) -> Dict[str, Any]:
         """Handle user feedback and make necessary adjustments."""
@@ -214,7 +536,7 @@ class Agent(BaseAgent):
         """Run the agent with the given prompt."""
         try:
             logger.info(f"Starting agent execution with prompt: {prompt}")
-            result = await self.execute(prompt)
+            result = await self.execute({"query": prompt})
             logger.info("Agent execution completed successfully")
             return result
         except Exception as e:

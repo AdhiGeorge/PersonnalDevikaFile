@@ -1,49 +1,116 @@
-import openai
+import logging
 import asyncio
-import os
-from Agentres.config import Config
-from Agentres.logger import Logger
+from typing import Dict, Any, Optional
+from Agentres.config.config import Config
+from Agentres.utils.logger import Logger
+from openai import AzureOpenAI, AsyncAzureOpenAI
 
-log = Logger()
+logger = logging.getLogger(__name__)
 
-class AzureOpenAI:
-    def __init__(self):
-        self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        self.api_base = os.getenv("AZURE_OPENAI_ENDPOINT")
-        self.api_version = os.getenv("AZURE_API_VERSION_CHAT", "2024-02-15-preview")
-        self.deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
-        
-        if not self.api_key or not self.api_base:
-            raise ValueError("Azure OpenAI API key and endpoint must be configured in environment variables")
-        
-        try:
-            self.client = openai.AzureOpenAI(
-                api_key=self.api_key,
-                api_version=self.api_version,
-                azure_endpoint=self.api_base
+class AzureOpenAIClient:
+    def __init__(self, config: Config):
+        """Initialize Azure OpenAI client with configuration."""
+        if not isinstance(config, Config):
+            raise ValueError("config must be an instance of Config")
+            
+        self.config = config
+        self._logger = None
+        self._client = None
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
+
+    @property
+    def logger(self) -> Logger:
+        """Lazy initialization of logger."""
+        if self._logger is None:
+            self._logger = Logger(self.config)
+        return self._logger
+
+    @property
+    def client(self) -> AsyncAzureOpenAI:
+        """Lazy initialization of Azure OpenAI client."""
+        if self._client is None:
+            self._client = AsyncAzureOpenAI(
+                api_key=self.config.get_azure_openai_api_key(),
+                api_version=self.config.get_openai_api_version(),
+                azure_endpoint=self.config.get_azure_openai_endpoint()
             )
-            log.info("Azure OpenAI client initialized successfully")
+        return self._client
+
+    async def initialize(self):
+        """Initialize async components."""
+        async with self._init_lock:
+            if self._initialized:
+                return
+                
+            try:
+                # Initialize logger
+                await self.logger.initialize()
+                
+                # Test Azure OpenAI client
+                try:
+                    client = self.client
+                    # Test chat completion with a simple prompt
+                    response = await client.chat.completions.create(
+                        model="gpt-4",
+                        messages=[{"role": "user", "content": "test"}],
+                        temperature=0.7,
+                        max_tokens=10
+                    )
+                    logger.info("Azure OpenAI client test successful")
+                except Exception as e:
+                    logger.error(f"Azure OpenAI client test failed: {str(e)}")
+                    raise ValueError(f"Failed to connect to Azure OpenAI: {str(e)}")
+                
+                self._initialized = True
+                logger.info("Azure OpenAI client async components initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize async components: {str(e)}")
+                raise ValueError(f"Async initialization failed: {str(e)}")
+
+    def _ensure_initialized(self):
+        """Ensure client is initialized before use."""
+        if not self._initialized:
+            raise RuntimeError("Client not initialized. Call initialize() first.")
+        if not self._logger or not self._client:
+            raise RuntimeError("Client components not properly initialized")
+
+    async def chat_completion(self, messages: list, model: str = "gpt-4") -> Any:
+        """Generate a chat completion using Azure OpenAI."""
+        try:
+            self._ensure_initialized()
+            response = await self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1000
+            )
+            return response
         except Exception as e:
-            log.error(f"Failed to initialize Azure OpenAI client: {str(e)}")
+            logger.error(f"Error in chat completion: {str(e)}")
+            if "Connection error" in str(e):
+                logger.error("Failed to connect to Azure OpenAI. Please check your endpoint and API key configuration.")
             raise
 
-    async def inference(self, model_id: str, prompt: str) -> str:
+    async def get_embedding(self, text: str, model: str = "text-embedding-3-small") -> list:
+        """Get embeddings for text using Azure OpenAI."""
         try:
-            loop = asyncio.get_event_loop()
-            chat_completion = await loop.run_in_executor(
-                None,
-                lambda: self.client.chat.completions.create(
-                    model=self.deployment_name,  # Use the deployment name instead of model_id
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt.strip(),
-                        }
-                    ],
-                    temperature=0
-                )
+            self._ensure_initialized()
+            response = await self.client.embeddings.create(
+                model=model,
+                input=text
             )
-            return chat_completion.choices[0].message.content
+            return response.data[0].embedding
         except Exception as e:
-            log.error(f"Error during Azure OpenAI inference: {str(e)}")
-            raise 
+            logger.error(f"Error getting embedding: {str(e)}")
+            raise
+
+    async def cleanup(self):
+        """Cleanup resources."""
+        try:
+            if self._initialized:
+                # Add cleanup logic here
+                pass
+        except Exception as e:
+            logger.error(f"Error cleaning up Azure OpenAI client: {str(e)}")
+            raise ValueError(f"Azure OpenAI client cleanup failed: {str(e)}") 

@@ -1,9 +1,11 @@
 from typing import List, Dict, Any
 from Agentres.llm.llm import LLM
+from Agentres.config.config import Config
 
 class ConversationNamer:
     def __init__(self):
-        self.llm = LLM()
+        self.config = Config()
+        self.llm = LLM(self.config)
 
     def generate_name(self, query: str, context: List[Dict[str, Any]] = None) -> str:
         """Generate a descriptive name for a conversation based on the query and context."""

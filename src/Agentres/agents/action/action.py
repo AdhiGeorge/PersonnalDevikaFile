@@ -1,26 +1,27 @@
 import json
 import sys
 import time
+import asyncio
 from functools import wraps
 import logging
 from typing import Any, Dict
 from Agentres.agents.base_agent import BaseAgent
-from Agentres.config import Config
+from Agentres.config.config import Config
 
 logger = logging.getLogger(__name__)
 
 def retry_wrapper(func):
     @wraps(func)
-    def wrapper(*args, **kwargs):
+    async def wrapper(*args, **kwargs):
         max_tries = 5
         tries = 0
         while tries < max_tries:
-            result = func(*args, **kwargs)
+            result = await func(*args, **kwargs)
             if result:
                 return result
             logger.warning("Invalid response from the model, trying again...")
             tries += 1
-            time.sleep(2)
+            await asyncio.sleep(2)
         logger.error("Maximum 5 attempts reached. Model keeps failing.")
         sys.exit(1)
     return wrapper
@@ -30,7 +31,7 @@ class InvalidResponseError(Exception):
 
 def validate_responses(func):
     @wraps(func)
-    def wrapper(*args, **kwargs):
+    async def wrapper(*args, **kwargs):
         args = list(args)
         response = args[1]
         response = response.strip()
@@ -38,7 +39,7 @@ def validate_responses(func):
         try:
             response = json.loads(response)
             args[1] = response
-            return func(*args, **kwargs)
+            return await func(*args, **kwargs)
 
         except json.JSONDecodeError:
             pass
@@ -48,7 +49,7 @@ def validate_responses(func):
             if response:
                 response = json.loads(response.strip())
                 args[1] = response
-                return func(*args, **kwargs)
+                return await func(*args, **kwargs)
 
         except (IndexError, json.JSONDecodeError):
             pass
@@ -61,7 +62,7 @@ def validate_responses(func):
                 try:
                     response = json.loads(json_str)
                     args[1] = response
-                    return func(*args, **kwargs)
+                    return await func(*args, **kwargs)
 
                 except json.JSONDecodeError:
                     pass
@@ -72,7 +73,7 @@ def validate_responses(func):
             try:
                 response = json.loads(line)
                 args[1] = response
-                return func(*args, **kwargs)
+                return await func(*args, **kwargs)
 
             except json.JSONDecodeError:
                 pass
@@ -82,9 +83,13 @@ def validate_responses(func):
     return wrapper
 
 class Action(BaseAgent):
-    def __init__(self, base_model: str):
-        super().__init__(base_model)
-        config = Config()
+    def __init__(self, config: Config):
+        """Initialize the action agent with configuration.
+        
+        Args:
+            config: Configuration instance
+        """
+        super().__init__(config)
         self.project_dir = config.get_projects_dir()
 
     def format_prompt(self, conversation: str) -> str:
@@ -95,7 +100,7 @@ class Action(BaseAgent):
         return super().format_prompt(prompt_template, conversation=conversation)
 
     @validate_responses
-    def validate_response(self, response: dict):
+    async def validate_response(self, response: dict):
         """Validate the response from the LLM."""
         if not isinstance(response, dict):
             return False
@@ -108,4 +113,4 @@ class Action(BaseAgent):
         """Execute the action agent."""
         prompt = self.format_prompt(conversation)
         response = await self.llm.chat_completion([{"role": "user", "content": prompt}], self.base_model)
-        return self.validate_response(json.loads(response.choices[0].message.content))
+        return await self.validate_response(json.loads(response.choices[0].message.content))
