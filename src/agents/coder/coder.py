@@ -541,3 +541,49 @@ class Coder(BaseAgent):
             'typescript': '.ts'
         }
         return extensions.get(language, '.txt')
+
+    async def generate_code(self, task=None, requirements=None, context=None, query=None):
+        """
+        Generate code based on the workflow's expectations.
+        Accepts either (task, requirements, context) or (query, context) for backward compatibility.
+        Returns a dict with at least 'code' and optionally 'explanation'.
+        """
+        self.logger.info(f"Generating code for task: {task or query}")
+        try:
+            # Determine the main prompt and requirements
+            if requirements is None and query is not None:
+                requirements = [query]
+            if isinstance(requirements, list):
+                requirements_str = '\n'.join(requirements)
+            else:
+                requirements_str = str(requirements) if requirements else ''
+            # Compose the prompt
+            prompt_template = await self.prompt_manager.get_prompt("code_generation")
+            # Only use keys that exist in the template
+            prompt_kwargs = {}
+            if '{task}' in prompt_template:
+                prompt_kwargs['task'] = task or query or ''
+            if '{requirements}' in prompt_template:
+                prompt_kwargs['requirements'] = requirements_str
+            if '{context}' in prompt_template:
+                prompt_kwargs['context'] = json.dumps(context) if context else ''
+            prompt = prompt_template.format(**prompt_kwargs)
+            response = await self.llm.generate(prompt)
+            code = self._extract_code(response)
+            explanation = None
+            # Try to extract an explanation if present
+            if isinstance(response, str):
+                # Look for an explanation after the code block
+                parts = re.split(r"```[a-zA-Z]*\n.*?```", response, flags=re.DOTALL)
+                if len(parts) > 1:
+                    explanation = parts[-1].strip()
+            await self.state.update({"generated_code": code})
+            self.logger.info(f"Code generated successfully for task: {task or query}")
+            return {"code": code, "explanation": explanation or ""}
+        except Exception as e:
+            self.logger.error(f"Code generation failed: {e}")
+            raise
+
+    def _extract_code(self, response):
+        match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
+        return match.group(1).strip() if match else response.strip()

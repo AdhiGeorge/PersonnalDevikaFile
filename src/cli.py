@@ -17,6 +17,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, Prompt
 from rich.syntax import Syntax
 from rich.table import Table
+import aiohttp
 
 from config.config import Config
 from agents.agent import Agent
@@ -535,6 +536,16 @@ Examples:
             logger.error(f"Failed to load workflow state: {str(e)}", exc_info=True)
             print(f"Error: Failed to load workflow state: {str(e)}")
 
+async def shutdown():
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.sleep(0.1)
+    loop = asyncio.get_event_loop()
+    await loop.shutdown_asyncgens()
+    async with aiohttp.ClientSession() as session:
+        await session.close()
+
 def main():
     """Main entry point for the CLI."""
     try:
@@ -556,4 +567,7 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    finally:
+        asyncio.run(shutdown())

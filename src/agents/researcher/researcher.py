@@ -37,6 +37,7 @@ from dataclasses import asdict
 import os
 import aiohttp
 from bs4 import BeautifulSoup
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 from agents.base_agent import BaseAgent
 from agents.planner.planner import SubQuery, QueryType
@@ -159,6 +160,8 @@ def validate_responses(func):
 
 class Researcher(BaseAgent):
     """Researcher agent for gathering information."""
+    
+    VALID_QUERY_TYPES = {'FACTUAL', 'HOW_TO', 'ANALYTICAL', 'CODE_GENERATION', 'RESEARCH', 'DATA_RETRIEVAL'}
     
     def __init__(self, config: Config, model: str = "gpt-4"):
         """Initialize the researcher.
@@ -435,7 +438,7 @@ class Researcher(BaseAgent):
             return False
         return len(content.split()) >= min_word_count
         
-    @retry(max_retries=3, backoff=1.0)
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     async def _scrape_with_browser(self, url: str) -> Optional[str]:
         """Scrape content using a headless browser."""
         from selenium.webdriver.chrome.options import Options
@@ -1072,65 +1075,119 @@ class Researcher(BaseAgent):
                 
         return "\n".join(formatted)
 
-    async def research(self, query: str) -> List[Dict[str, Any]]:
-        """Research a query using knowledge base and web search."""
+    async def research(self, query, query_type="FACTUAL"):
+        self.logger.info(f"Starting research for query: {query}")
         try:
-            if not self._initialized:
-                await self.initialize()
-            self.logger.info(f"Starting research for query: {query}")
-            kb_results, kb_complete = await self._search_knowledge_base(query, min_results=1)
-            web_results = []
-            sub_query_coverages = []
-            sub_query_concept_coverages = []
-            sub_query_results = []
-            if not kb_complete:
+            query_type = self.validate_query_type(query_type)
+            kb_results, kb_success = await self._search_knowledge_base(query)
+            processed_results = []
+            if len(kb_results) < 1:
                 self.logger.info(f"Insufficient knowledge base results for: {query}")
-                sub_queries = await self._generate_sub_queries(query)
-                self.logger.info(f"Generated {len(sub_queries)} sub-queries for web search")
-                for sub_query in sub_queries:
-                    self.logger.info(f"Processing sub-query: {sub_query.query}")
-                    sub_results = await self._search_web(sub_query.query, self.max_web_results)
-                    for result in sub_results:
-                        if 'url' in result:
-                            content = await self._extract_content(result['url'])
-                            if content:
-                                result['content'] = content
-                                result['query_id'] = sub_query.id
-                                result['query_type'] = sub_query.query_type.value
-                                web_results.append(result)
-                    await self.store_research_results(sub_query.query, sub_results)
-                    # Evaluate coverage for this sub-query
-                    all_content = " ".join([
-                        r.get("content", "") + " " + r.get("snippet", "") for r in sub_results
-                    ])
-                    query_terms = set(sub_query.query.lower().split())
-                    content_terms = set(all_content.lower().split())
-                    covered_terms = query_terms.intersection(content_terms)
-                    coverage = len(covered_terms) / len(query_terms) if query_terms else 0
-                    key_concepts = ["vix", "volatility index", "s&p 500", "market volatility", "fear gauge", "implied volatility"]
-                    concept_coverage = sum(1 for concept in key_concepts if concept in all_content.lower()) / len(key_concepts) if key_concepts else 0
-                    sub_query_coverages.append(coverage)
-                    sub_query_concept_coverages.append(concept_coverage)
-                    sub_query_results.append(sub_results)
-                    self.logger.info(f"Sub-query: {sub_query.query}, Coverage: {coverage:.2%}, Key concept coverage: {concept_coverage:.2%}, Results: {sub_results}")
-                    await asyncio.sleep(1)
-            all_results = await self._combine_results(kb_results, web_results)
-            # Aggregate coverage across all sub-queries
-            avg_coverage = sum(sub_query_coverages) / len(sub_query_coverages) if sub_query_coverages else 0
-            avg_concept_coverage = sum(sub_query_concept_coverages) / len(sub_query_concept_coverages) if sub_query_concept_coverages else 0
-            self.logger.info(f"Aggregated sub-query coverage: {avg_coverage:.2%}, Aggregated key concept coverage: {avg_concept_coverage:.2%}")
-            # If any sub-query achieves >0% coverage, allow the step to proceed
-            if avg_coverage > 0 or avg_concept_coverage > 0 or await self.evaluate_search_results(all_results, query):
-                await self.store_research_results(query, all_results)
-                self.logger.info(f"Research completed with {len(all_results)} results")
-                return all_results
-            self.logger.warning("Search results evaluation failed (all sub-queries < 1% coverage)")
-            return []
+                try:
+                    web_results = await self._search_web(query)
+                except Exception as e:
+                    self.logger.error(f"Web search failed for query '{query}': {e}")
+                    return f"Error: Web search failed for '{query}'"
+                for result in web_results:
+                    try:
+                        content_dict = await self._extract_content(result)
+                        content = content_dict.get('content', '')
+                        self.logger.debug(f"Processing result: {type(content_dict)}, {content_dict}")
+                        processed_results.append(content)
+                        # Store in KB, handle both async and sync store
+                        store_method = getattr(self.knowledge_base, 'store', None)
+                        if store_method:
+                            if asyncio.iscoroutinefunction(store_method):
+                                await store_method(
+                                    content=content,
+                                    metadata={
+                                        'url': content_dict.get('url', ''),
+                                        'title': content_dict.get('title', ''),
+                                        'source': content_dict.get('source', '')
+                                    },
+                                    embedding=await self.llm.generate_embedding(content)
+                                )
+                            else:
+                                store_method(
+                                    content=content,
+                                    metadata={
+                                        'url': content_dict.get('url', ''),
+                                        'title': content_dict.get('title', ''),
+                                        'source': content_dict.get('source', '')
+                                    },
+                                    embedding=await self.llm.generate_embedding(content)
+                                )
+                    except Exception as e:
+                        self.logger.error(f"Failed to process result for {result.get('url', 'unknown')}: {e}")
+                        continue
+            else:
+                processed_results.extend([r.get('content', '') for r in kb_results])
+            final_result = "\n".join(str(r) for r in processed_results if isinstance(r, str))
+            if not final_result:
+                self.logger.warning(f"No results found for query: {query}")
+                return f"No results found for '{query}'"
+            return final_result
         except Exception as e:
-            error_msg = f"Research failed: {str(e)}"
-            self.logger.error(error_msg)
-            raise ValueError(error_msg)
-            
+            self.logger.error(f"Research failed for query '{query}': {e}")
+            return f"Error: Research failed for '{query}'"
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    async def _extract_content(self, search_result):
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                'User-Agent': random.choice([
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15'
+                ]),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5'
+            }
+            try:
+                async with session.get(search_result['url'], headers=headers, timeout=10) as response:
+                    if response.status == 403:
+                        self.logger.warning(f"HTTP 403 for {search_result['url']}, using snippet")
+                        return {
+                            'url': search_result['url'],
+                            'title': search_result.get('title', ''),
+                            'content': search_result.get('snippet', ''),
+                            'source': search_result.get('source', '')
+                        }
+                    response.raise_for_status()
+                    content_type = response.headers.get('Content-Type', '')
+                    if 'application/pdf' in content_type:
+                        self.logger.warning(f"PDF detected for {search_result['url']}, using snippet")
+                        return {
+                            'url': search_result['url'],
+                            'title': search_result.get('title', ''),
+                            'content': search_result.get('snippet', ''),
+                            'source': search_result.get('source', '')
+                        }
+                    html = await response.text(encoding='utf-8', errors='ignore')
+                    soup = BeautifulSoup(html, 'html.parser')
+                    content = ' '.join([p.get_text(strip=True) for p in soup.find_all('p')])
+                    return {
+                        'url': search_result['url'],
+                        'title': search_result.get('title', ''),
+                        'content': content or search_result.get('snippet', ''),
+                        'source': search_result.get('source', '')
+                    }
+            except aiohttp.ClientError as e:
+                self.logger.warning(f"HTTP error for {search_result['url']}: {e}, using snippet")
+                return {
+                    'url': search_result['url'],
+                    'title': search_result.get('title', ''),
+                    'content': search_result.get('snippet', ''),
+                    'source': search_result.get('source', '')
+                }
+            except Exception as e:
+                self.logger.error(f"Error extracting content from {search_result['url']}: {e}")
+                return {
+                    'url': search_result['url'],
+                    'title': search_result.get('title', ''),
+                    'content': search_result.get('snippet', ''),
+                    'source': search_result.get('source', '')
+                }
+
     async def _generate_sub_queries(self, query: str) -> List[SubQuery]:
         """Generate sub-queries for web search.
         
@@ -1380,11 +1437,7 @@ class Researcher(BaseAgent):
         if hasattr(self, '_session') and self._session and not self._session.closed:
             await self._session.close()
 
-    VALID_QUERY_TYPES = {'FACTUAL', 'HOW_TO', 'ANALYTICAL', 'DATA_RETRIEVAL'}
-
-    def _normalize_query_type(self, query_type: str) -> str:
-        if not query_type:
-            return 'FACTUAL'
+    def validate_query_type(self, query_type):
         qt = str(query_type).strip().replace('-', '_').upper()
         if qt not in self.VALID_QUERY_TYPES:
             self.logger.warning(f"Invalid query type {query_type}, defaulting to FACTUAL")

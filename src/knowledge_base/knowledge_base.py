@@ -15,6 +15,7 @@ import uuid
 from sqlmodel import Field, Session, SQLModel, create_engine
 import tiktoken
 import re
+import nltk
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -736,6 +737,34 @@ class KnowledgeBase:
         except Exception as e:
             logger.error(f"Error clearing knowledge: {str(e)}")
             return False
+
+    def chunk_text(self, text, max_tokens=8192):
+        sentences = nltk.sent_tokenize(text)
+        chunks, current_chunk, current_count = [], [], 0
+        for sentence in sentences:
+            token_count = len(sentence.split())
+            if current_count + token_count > max_tokens:
+                chunks.append(' '.join(current_chunk))
+                current_chunk, current_count = [sentence], token_count
+            else:
+                current_chunk.append(sentence)
+                current_count += token_count
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+        return chunks
+
+    def store(self, content, metadata, embedding=None):
+        for chunk in self.chunk_text(content):
+            chunk_embedding = self.llm.generate_embedding(chunk) if not embedding else embedding
+            self.qdrant_client.upsert(
+                collection_name="knowledge_base",
+                points=[{
+                    'id': str(uuid.uuid4()),
+                    'vector': chunk_embedding,
+                    'payload': {'content': chunk, **metadata}
+                }],
+                wait=True
+            )
 
 if __name__ == "__main__":
     # Real, practical example usage
