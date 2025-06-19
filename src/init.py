@@ -1,7 +1,7 @@
 import os
-from Agentres.config.config import Config
-from Agentres.utils.logger import Logger
-from Agentres.bert.sentence import SentenceBert
+from config import Config
+from utils.logger import Logger
+from bert.sentence import SentenceBert
 
 
 def init_agent():

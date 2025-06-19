@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\AdithyaGeorge\Desktop\PersonnalDevikaFile\venv_py310_new"
+VIRTUAL_ENV="C:\Users\Hp\Desktop\PersonnalDevikaFile\venv_py310_new"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

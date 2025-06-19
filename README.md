@@ -119,3 +119,7 @@ The project uses two main configuration files:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+
+
+new "what is volatility index and what is the mathematical formula to calculate the vix score and also write a python code to calculate the vix score"

@@ -1,15 +1,15 @@
 # Azure OpenAI Configuration
 azure_openai:
   enabled: true
-  model: "gpt-4o"
+  model: "gpt-4"
   api_version: "2024-02-15-preview"
   temperature: 0
   max_tokens: 4000
   timeout: 60
   retry_attempts: 3
   retry_delay: 2
-  endpoint: ""  # Add your Azure OpenAI endpoint here
-  api_key: ""  # Add your Azure OpenAI API key here
+  endpoint: "https://bu01azureopenai.openai.azure.com"  # Azure OpenAI endpoint
+  api_key: "08b98992f8ab46c39ac14597735e1f82"  # Azure OpenAI API key
   pricing:
     input: 0.03  # per 1K tokens
     output: 0.06  # per 1K tokens
@@ -130,7 +130,7 @@ qdrant:
   collection: "agent_knowledge"
   vector_size: 384  # for all-MiniLM-L6-v2
   distance: "Cosine"
-  on_disk_payload: true
+  on_disk_payload: false
   optimizers_config:
     indexing_threshold: 20000
     memmap_threshold: 50000
