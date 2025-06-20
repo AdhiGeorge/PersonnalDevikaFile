@@ -219,13 +219,18 @@ class Coder(BaseAgent):
             
             # Get the code generation prompt
             code_generation_prompt = self.prompt_manager.get_prompt('code_generation')
+            if asyncio.iscoroutine(code_generation_prompt):
+                code_generation_prompt = await code_generation_prompt
             
-            # Format the prompt with requirements, context, and plan
-            system_prompt = code_generation_prompt.format(
-                requirements=query,
-                context=research,
-                plan=plan
-            )
+            # Build prompt_kwargs based on template
+            prompt_kwargs = {
+                'requirements': query,
+                'context': research
+            }
+            if '{plan}' in code_generation_prompt:
+                prompt_kwargs['plan'] = plan
+
+            system_prompt = code_generation_prompt.format(**prompt_kwargs)
             
             # Generate code using LLM
             self.logger.debug(f"Sending request to LLM with prompt: {system_prompt[:200]}...")
@@ -277,6 +282,8 @@ class Coder(BaseAgent):
             
             # Get the code review prompt
             code_review_prompt = self.prompt_manager.get_prompt('code_review')
+            if asyncio.iscoroutine(code_review_prompt):
+                code_review_prompt = await code_review_prompt
             
             # Format the prompt with the code and requirements
             system_prompt = code_review_prompt.format(
@@ -542,10 +549,11 @@ class Coder(BaseAgent):
         }
         return extensions.get(language, '.txt')
 
-    async def generate_code(self, task=None, requirements=None, context=None, query=None):
+    async def generate_code(self, task=None, requirements=None, context=None, query=None, plan=None, project=None):
         """
         Generate code based on the workflow's expectations.
         Accepts either (task, requirements, context) or (query, context) for backward compatibility.
+        Optionally accepts a project name for state updates.
         Returns a dict with at least 'code' and optionally 'explanation'.
         """
         self.logger.info(f"Generating code for task: {task or query}")
@@ -567,6 +575,8 @@ class Coder(BaseAgent):
                 prompt_kwargs['requirements'] = requirements_str
             if '{context}' in prompt_template:
                 prompt_kwargs['context'] = json.dumps(context) if context else ''
+            if '{plan}' in prompt_template and plan is not None:
+                prompt_kwargs['plan'] = plan
             prompt = prompt_template.format(**prompt_kwargs)
             response = await self.llm.generate(prompt)
             code = self._extract_code(response)
@@ -577,7 +587,9 @@ class Coder(BaseAgent):
                 parts = re.split(r"```[a-zA-Z]*\n.*?```", response, flags=re.DOTALL)
                 if len(parts) > 1:
                     explanation = parts[-1].strip()
-            await self.state.update({"generated_code": code})
+            # Update agent state for the current project if project is provided
+            if project:
+                await self.state.update_state(project, {"generated_code": code})
             self.logger.info(f"Code generated successfully for task: {task or query}")
             return {"code": code, "explanation": explanation or ""}
         except Exception as e:

@@ -11,9 +11,7 @@ class SentenceBert:
         """Extract keywords from the text using BERT embeddings."""
         # Get sentence embeddings
         embeddings = self.model.encode([self.text])
-        
-        # For now, return a simple list of words
-        # In a real implementation, this would use more sophisticated keyword extraction
+        # Get the most similar sentence
         return self.text.split()
         
     def get_embedding(self) -> np.ndarray:

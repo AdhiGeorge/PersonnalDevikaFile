@@ -194,6 +194,7 @@ class CLI:
                     if success:
                         # Display results
                         self.workflow_manager.display_results()
+                        print("\n[INFO] All generated output files are saved in the respective output folders. Use the 'show <file>' command to view them in the terminal.")
                     else:
                         print("\nWorkflow failed to complete")
                         
@@ -546,7 +547,7 @@ async def shutdown():
     async with aiohttp.ClientSession() as session:
         await session.close()
 
-def main():
+async def main():
     """Main entry point for the CLI."""
     try:
         # Check Python version
@@ -556,13 +557,13 @@ def main():
             
         # Create and run the CLI
         cli = CLI()
-        asyncio.run(cli.run())
+        await cli.run()
         
     except KeyboardInterrupt:
-        console.print("\n[yellow]Exiting...[/yellow]")
+        console.print("\n[yellow]Exiting...[\/yellow]")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]Fatal error: {str(e)}[/red]")
+        console.print(f"[red]Fatal error: {str(e)}[\/red]")
         logger.exception("Fatal error in main")
         sys.exit(1)
 

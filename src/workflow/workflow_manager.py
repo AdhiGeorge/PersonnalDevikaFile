@@ -202,16 +202,33 @@ class WorkflowManager:
             print("\nCode Generation Phase:")
             print("-" * 20)
             print(self.current_workflow['code'])
-            
             if 'code_file' in self.current_workflow:
                 print(f"\nCode saved to: {self.current_workflow['code_file']}")
-                
-        # Display any errors
-        if 'error' in self.current_workflow:
-            print("\nErrors:")
-            print("-" * 20)
-            print(self.current_workflow['error'])
-            
+                # Print full code file contents
+                try:
+                    with open(self.current_workflow['code_file'], 'r', encoding='utf-8') as f:
+                        code_content = f.read()
+                    print("\nFull Generated Code:")
+                    print("-------------------")
+                    print(code_content)
+                except Exception as e:
+                    print(f"Could not read code file: {e}")
+
+        # Display final answer if present
+        if 'text_file' in self.current_workflow:
+            print(f"\nFinal answer saved to: {self.current_workflow['text_file']}")
+            try:
+                with open(self.current_workflow['text_file'], 'r', encoding='utf-8') as f:
+                    answer_content = f.read()
+                print("\nFinal Answer (Full Text):")
+                print("------------------------")
+                print(answer_content)
+            except Exception as e:
+                print(f"Could not read final answer file: {e}")
+
+        # Inform user about output files
+        print("\n[INFO] All generated output files are saved in the respective output folders. You can access them directly or use the CLI 'show' command to view them.")
+
         # Display workflow status
         print("\nWorkflow Status:")
         print("-" * 20)
@@ -260,12 +277,16 @@ class WorkflowManager:
         for query in step.get('queries', []):
             try:
                 result = await self.researcher.research(query)
-                if result and 'content' in result:
+                # Accept both dict (with 'content') and string (error or no results)
+                if (isinstance(result, dict) and 'content' in result) or (isinstance(result, str) and result):
                     results.append({
                         'query': query,
                         'result': result,
-                        'status': 'completed'
+                        'status': 'completed' if (isinstance(result, dict) and 'content' in result) or (isinstance(result, str) and result and not result.lower().startswith('error')) else 'failed'
                     })
+                    # Print warning if result is a string and not a dict
+                    if isinstance(result, str) and (result.lower().startswith('no results') or result.lower().startswith('error')):
+                        print(f"[WARNING] Research for query '{query}' returned: {result}")
             except Exception as e:
                 logger.error(f"Error researching query '{query}': {str(e)}")
                 results.append({
@@ -273,10 +294,11 @@ class WorkflowManager:
                     'error': str(e),
                     'status': 'failed'
                 })
-        
+        # Only fail if all queries failed with actual exceptions
+        step_status = 'completed' if any(r['status'] == 'completed' for r in results) else 'failed'
         return {
             'type': 'research',
-            'status': 'completed' if any(r['status'] == 'completed' for r in results) else 'failed',
+            'status': step_status,
             'results': results
         }
     
@@ -295,18 +317,23 @@ class WorkflowManager:
         
         # Generate code
         try:
+            # Check if the code_generation prompt template requires 'plan'
+            prompt_template = await self.coder.prompt_manager.get_prompt('code_generation')
+            plan_value = self.current_workflow.get('plan') if '{plan}' in prompt_template else None
             code_result = await self.coder.generate_code(
                 task=step.get('description', ''),
                 requirements=step.get('queries', []),
-                context=dependencies
+                context=dependencies,
+                plan=plan_value,
+                project=self.current_workflow.get('project')
             )
             
             # Save code to file
             code_file = None
             if code_result and 'code' in code_result:
                 code_file = await self.file_manager.save_code(
-                    code=code_result['code'],
-                    filename=f"code_{step['id']}.py"
+                    content=code_result['code'],
+                    language='python'
                 )
             
             return {
